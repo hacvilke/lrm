@@ -28,7 +28,7 @@ into a peer-to-peer equivalent. This is the complete translation table.
 | `git cherry-pick H` | `lrm cherry-pick REF` | file-level 3-way replay; conflicts abort cleanly, workdir untouched |
 | `git grep PAT` | `lrm grep [-i] [-l] PAT [REF]` | literal substring (no regex dialect); workdir or any ref; binary/large skipped |
 | `git config user.name` | `lrm config user [NAME]` | view/set author name; `port` likewise; peer id is immutable |
-| `git clean -fd` | `lrm clean [-f] [-d]` | dry run by default — nothing deletes without `-f` |
+| `git clean -fd` | `lrm clean [-f] [-d] [-x]` | dry run by default — nothing deletes without `-f`; `-x` includes ignored paths |
 | `git describe` | `lrm describe [REF]` | nearest reachable tag (`v1-3-g<short>`); BFS over all parents |
 | `git commit --amend` | `lrm commit --amend [-m MSG]` | folds workdir into tip (same parents; old tip unreferenced) |
 | `git checkout -b N` | `lrm checkout -b N` | create + switch in one step |
@@ -44,6 +44,12 @@ into a peer-to-peer equivalent. This is the complete translation table.
 | `.gitignore` | `.lrmignore` | basename / `*` / anchored / `dir/` / `!` rules; honored by commit builds, `grep`, and `clean` (`-x` overrides); `.lrm`/`.git` always excluded |
 | `git stash show/drop/clear` | `lrm stash show [--name-only]` / `drop [N]` / `clear` | show = parent-vs-shelf unified diff; drop/pop compact shelf numbers; `pop` still restores newest by default |
 | `git gc` keeping reflog tips | `lrm gc` | ref-log old/new tips are reachability roots: amended/reset-away commits survive collection |
+| `git branch -d/-D` | `lrm branch -d/-D NAME...` | safe delete refuses unmerged tips and the current branch; the ref-log keeps a deletion entry so the tip stays recoverable |
+| `git stash apply` | `lrm stash apply [N]` | restore a shelf without dropping it (pop's non-destructive sibling) |
+| `git rev-parse` | `lrm rev-parse [--short] [--abbrev-ref] REF...` | print resolved hashes; `--abbrev-ref` prints the branch name when one points at the tip |
+| `git merge-base A B` | `lrm merge-base A B` | best common ancestor (the LCA resolver, scriptable) |
+| `git cherry` | `lrm cherry UPSTREAM [HEAD]` | branch-unique commits oldest-first: `+` missing upstream, `-` already applied (content+subject equivalence) |
+| `git check-ignore` | `lrm check-ignore [-v] PATH...` | test `.lrmignore` rules; `-v` prints `.lrmignore:LINE:PATTERN` per hit |
 | `git cat-file -p H` | `lrm cat-file H` | prints blobs / manifests / trees / commits |
 | `git fsck` | `lrm fsck` | verifies CAS reachability from all refs (compat layer) |
 | `git gc` | `lrm gc` | drops objects unreachable from refs + ref-log tips (compat layer) |

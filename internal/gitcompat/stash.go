@@ -10,6 +10,7 @@ import (
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/diff"
+	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/store"
 )
 
@@ -36,6 +37,57 @@ func findStashEntry(entries []StashEntry, name string) *StashEntry {
 func shelfFileName(entryName string) string {
 	s := strings.TrimPrefix(entryName, "stash@{")
 	return strings.TrimSuffix(s, "}")
+}
+
+// StashApply restores a shelf's tree into the workdir WITHOUT dropping the
+// shelf (pop's non-destructive sibling). Empty name = newest.
+func StashApply(r *store.Repo, name string) (*StashEntry, error) {
+	entries, err := StashList(r)
+	if err != nil {
+		return nil, err
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no stash entries found")
+	}
+	pick := findStashEntry(entries, name)
+	if pick == nil {
+		return nil, fmt.Errorf("unknown stash %q", name)
+	}
+	if err := restoreShelfFiles(r, pick); err != nil {
+		return nil, err
+	}
+	return pick, nil
+}
+
+// restoreShelfFiles writes a shelf's full tree into the workdir WITHOUT
+// touching the index/refs, so `status` shows the restored delta.
+func restoreShelfFiles(r *store.Repo, pick *StashEntry) error {
+	h, err := cas.ParseHex(pick.Commit)
+	if err != nil {
+		return err
+	}
+	c, err := r.DAG.Get(h)
+	if err != nil {
+		return err
+	}
+	th, err := cas.ParseHex(c.Tree)
+	if err != nil {
+		return err
+	}
+	flat := map[string]string{}
+	if err := merkle.Flatten(r.CAS, th, "", flat); err != nil {
+		return err
+	}
+	for p, hx := range flat {
+		oh, err := cas.ParseHex(hx)
+		if err != nil {
+			return err
+		}
+		if err := writeObjectToFile(r, oh, filepath.Join(r.Root, filepath.FromSlash(p))); err != nil {
+			return fmt.Errorf("restore %s: %w", p, err)
+		}
+	}
+	return nil
 }
 
 // --- show ---

@@ -13,6 +13,23 @@ type IgnoreRule struct {
 	Negate   bool // !pattern re-includes
 	DirOnly  bool // dir/ matches everything beneath
 	Anchored bool // pattern contains / (after dir strip): match full path
+	Line     int  // 1-based source line (0 when built by hand)
+}
+
+// Source reconstructs the rule's .lrmignore spelling for reports.
+func (r IgnoreRule) Source() string {
+	var sb strings.Builder
+	if r.Negate {
+		sb.WriteString("!")
+	}
+	if r.Anchored {
+		sb.WriteString("/")
+	}
+	sb.WriteString(r.Pattern)
+	if r.DirOnly {
+		sb.WriteString("/")
+	}
+	return sb.String()
 }
 
 // Matcher applies .lrmignore rules. The zero value ignores nothing;
@@ -29,12 +46,13 @@ func LoadIgnore(root string) *Matcher {
 	if err != nil {
 		return m
 	}
-	for _, ln := range strings.Split(string(raw), "\n") {
+	for i, ln := range strings.Split(string(raw), "\n") {
 		ln = strings.TrimSpace(ln)
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue
 		}
 		var r IgnoreRule
+		r.Line = i + 1
 		if strings.HasPrefix(ln, "!") {
 			r.Negate = true
 			ln = strings.TrimSpace(ln[1:])
@@ -54,6 +72,22 @@ func LoadIgnore(root string) *Matcher {
 		m.rules = append(m.rules, r)
 	}
 	return m
+}
+
+// MatchRule returns the last rule deciding rel (nil when no rule matches).
+// A returned Negate rule means "re-included" (not ignored).
+func (m *Matcher) MatchRule(rel string) *IgnoreRule {
+	if m == nil {
+		return nil
+	}
+	rel = strings.TrimPrefix(rel, "./")
+	var last *IgnoreRule
+	for i := range m.rules {
+		if m.rules[i].match(rel) {
+			last = &m.rules[i]
+		}
+	}
+	return last
 }
 
 // Ignored reports whether slash-relative rel (file or dir) is ignored.

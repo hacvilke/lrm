@@ -211,26 +211,8 @@ func StashPop(r *store.Repo, name string) (*StashEntry, error) {
 	if pick == nil {
 		return nil, fmt.Errorf("unknown stash %q", name)
 	}
-	h, _ := cas.ParseHex(pick.Commit)
-	c, err := r.DAG.Get(h)
-	if err != nil {
+	if err := restoreShelfFiles(r, pick); err != nil {
 		return nil, err
-	}
-	th, _ := cas.ParseHex(c.Tree)
-	flat := map[string]string{}
-	if err := merkle.Flatten(r.CAS, th, "", flat); err != nil {
-		return nil, err
-	}
-	// Write shelved files into workdir WITHOUT touching the index/refs,
-	// so `status` shows them as the restored delta.
-	for p, hx := range flat {
-		oh, err := cas.ParseHex(hx)
-		if err != nil {
-			return nil, err
-		}
-		if err := writeObjectToFile(r, oh, filepath.Join(r.Root, filepath.FromSlash(p))); err != nil {
-			return nil, fmt.Errorf("restore %s: %w", p, err)
-		}
 	}
 	// Drop the shelf and compact the rest (a pop renumbers, git parity).
 	_ = os.Remove(filepath.Join(shelfDir(r), shelfFileName(pick.Name)))

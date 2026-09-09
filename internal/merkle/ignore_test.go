@@ -43,3 +43,28 @@ func TestIgnoreMatcher(t *testing.T) {
 		t.Fatal("nil matcher should ignore nothing")
 	}
 }
+
+func TestMatchRule(t *testing.T) {
+	dir := t.TempDir()
+	content := "*.log\nbuild/\n!important.log\n"
+	if err := os.WriteFile(filepath.Join(dir, ".lrmignore"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := LoadIgnore(dir)
+	r := m.MatchRule("a.log")
+	if r == nil || r.Negate || r.Line != 1 || r.Source() != "*.log" {
+		t.Fatalf("rule=%+v", r)
+	}
+	r = m.MatchRule("build/o.o")
+	if r == nil || r.Line != 2 || r.Source() != "build/" {
+		t.Fatalf("rule=%+v", r)
+	}
+	// Negation matches but re-includes.
+	r = m.MatchRule("important.log")
+	if r == nil || !r.Negate || m.Ignored("important.log") {
+		t.Fatalf("neg=%+v", r)
+	}
+	if m.MatchRule("nope.txt") != nil {
+		t.Fatal("unmatched path should yield nil")
+	}
+}

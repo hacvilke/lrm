@@ -64,6 +64,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
 | | `bisect` (DAG-correct), `ref-log`, `archive`, `shortlog`, `mv`, `~`/`^` ref suffixes | ✅ |
 | | `rebase` (linear, scratch-branch, continue/abort), `notes`, `.lrmignore`, `stash show/drop/clear`, `log --grep/--author`, GC honors ref-logs | ✅ |
+| | `branch -d/-D`, `stash apply`, `rev-parse`, `merge-base`, `cherry`, `check-ignore` | ✅ |
 | **4 — Scripting** | LRS runtime language (`.lr`): sharing + site/network tests, `.txt` reports | ✅ |
 | | LRQ query language (`.lrq`): 8 read-only repo queries, `.txt` reports | ✅ |
 | | `lrm run` / `lrm query` + bare `lrm file.lr` dispatch, tag delete | ✅ |
@@ -82,6 +83,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm show [HASH]` | commit detail + file list + unified patches |
 | `lrm diff [H1 [H2]] [--stat]` | unified patches, or file list with `--stat` |
 | `lrm branch [--list] [NAME]` | list / create branches |
+| `lrm branch -d\|-D NAME...` | delete branches (safe refuses unmerged) |
 | `lrm checkout <BRANCH>` | switch branch (rewrites workdir, streaming) |
 | `lrm merge <BRANCH\|HASH>` | fast-forward or 3-way merge |
 | `lrm cat-file <HASH>` | print a CAS object |
@@ -95,7 +97,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm push [--peer H:P]` | sync history out to peers (force-push is impossible by design) |
 | `lrm pull` / `lrm fetch` | sync in from peers (bidirectional in one session) |
 | `lrm clone <PORTKEY> [dir]` | verified dial + full history + checkout |
-| `lrm stash [push\|pop\|list\|show\|drop\|clear]` | shelf / restore / inspect workdir deltas |
+| `lrm stash [push\|pop\|apply\|list\|show\|drop\|clear]` | shelf / restore / inspect workdir deltas |
 | `lrm reset [--soft\|--mixed\|--hard] <H>` | move branch ref (± index ± workdir) |
 | `lrm fsck` | verify CAS reachability from all refs |
 | `lrm gc [--dry-run]` | prune unreachable objects |
@@ -115,6 +117,10 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm mv <SRC> <DST>` | rename a workdir file |
 | `lrm rebase <UP> [--continue\|--abort]` | replay branch commits onto upstream (linear only, atomic move) |
 | `lrm notes add\|show\|list\|remove <REF>` | local-only commit annotations (shown by `show`) |
+| `lrm rev-parse [--short] [--abbrev-ref] <REF>` | print resolved commit hash(es) |
+| `lrm merge-base <A> <B>` | best common ancestor of two refs |
+| `lrm cherry <UP> [HEAD]` | branch-unique commits (`+` missing, `-` applied) |
+| `lrm check-ignore [-v] <PATH>...` | test `.lrmignore` rules |
 | `lrm tag [NAME [HASH]]` | list / create lightweight tags |
 | `lrm tag -d NAME` | delete a tag |
 | `lrm run <S.lr> [--report P] [--timeout D] [-- args]` | run an LRS script, export `.txt` report |

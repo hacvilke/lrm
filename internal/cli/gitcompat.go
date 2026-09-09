@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/gitcompat"
 	"github.com/lrm-project/lrm/internal/mdns"
+	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/portkey"
 	"github.com/lrm-project/lrm/internal/store"
@@ -144,7 +146,7 @@ func cmdStash(args []string) error {
 	sub := ""
 	rest := args
 	if len(args) > 0 && (args[0] == "push" || args[0] == "pop" || args[0] == "list" ||
-		args[0] == "show" || args[0] == "drop" || args[0] == "clear") {
+		args[0] == "show" || args[0] == "drop" || args[0] == "clear" || args[0] == "apply") {
 		sub, rest = args[0], args[1:]
 	}
 	r, err := openRepo()
@@ -171,6 +173,16 @@ func cmdStash(args []string) error {
 			return err
 		}
 		fmt.Printf("restored %s (%s) — workdir is dirty with the shelved delta.\n", e.Name, e.Message)
+	case "apply":
+		name := ""
+		if len(rest) > 0 {
+			name = rest[0]
+		}
+		e, err := gitcompat.StashApply(r, name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("applied %s (%s) — shelf kept.\n", e.Name, e.Message)
 	case "list":
 		entries, err := gitcompat.StashList(r)
 		if err != nil {
@@ -1026,4 +1038,189 @@ func withinRoot(root, p string) bool {
 		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func cmdRevParse(args []string) error {
+	short, args := hasFlag(args, "--short")
+	_, args = hasFlag(args, "--verify") // accepted for muscle memory; resolution is always strict
+	abbrev, args := hasFlag(args, "--abbrev-ref")
+	if len(args) == 0 {
+		return fmt.Errorf("usage: lrm rev-parse [--short] [--verify] [--abbrev-ref] <ref>...")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	var branches []string
+	if abbrev {
+		branches, _ = r.ListBranches()
+	}
+	for _, ref := range args {
+		h, err := resolveCommitRef(r, ref)
+		if err != nil {
+			return err
+		}
+		hexStr := cas.Hex(h)
+		if abbrev {
+			if isBranchName(branches, ref) {
+				fmt.Println(ref)
+				continue
+			}
+			if b := branchAtTip(r, branches, hexStr); b != "" {
+				fmt.Println(b)
+				continue
+			}
+		}
+		if short {
+			fmt.Println(shortHex(hexStr))
+		} else {
+			fmt.Println(hexStr)
+		}
+	}
+	return nil
+}
+
+func isBranchName(branches []string, name string) bool {
+	for _, b := range branches {
+		if b == name {
+			return true
+		}
+	}
+	return false
+}
+
+// branchAtTip returns the (sorted-first) branch pointing at hexStr, if any.
+func branchAtTip(r *store.Repo, branches []string, hexStr string) string {
+	var hits []string
+	for _, b := range branches {
+		if tip, _ := r.GetRef(b); tip == hexStr {
+			hits = append(hits, b)
+		}
+	}
+	if len(hits) == 0 {
+		return ""
+	}
+	sort.Strings(hits)
+	return hits[0]
+}
+
+func cmdMergeBase(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: lrm merge-base <A> <B>")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	a, err := resolveCommitRef(r, args[0])
+	if err != nil {
+		return err
+	}
+	b, err := resolveCommitRef(r, args[1])
+	if err != nil {
+		return err
+	}
+	base, err := gitcompat.MergeBase(r, a, b)
+	if err != nil {
+		return err
+	}
+	fmt.Println(cas.Hex(base))
+	return nil
+}
+
+func cmdCherry(args []string) error {
+	if len(args) < 1 || len(args) > 2 {
+		return fmt.Errorf("usage: lrm cherry <upstream> [<head>]")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	up, err := resolveCommitRef(r, args[0])
+	if err != nil {
+		return err
+	}
+	head := cas.Nil
+	if len(args) == 2 {
+		head, err = resolveCommitRef(r, args[1])
+		if err != nil {
+			return err
+		}
+	} else {
+		head, _, err = r.HeadCommit()
+		if err != nil {
+			return err
+		}
+		if head == cas.Nil {
+			return fmt.Errorf("no commits yet")
+		}
+	}
+	ents, err := gitcompat.Cherry(r, up, head)
+	if err != nil {
+		return err
+	}
+	for _, e := range ents {
+		mark := "+"
+		if e.Applied {
+			mark = "-"
+		}
+		fmt.Printf("%s %s %s\n", mark, shortHex(e.Commit), e.Subject)
+	}
+	return nil
+}
+
+func cmdCheckIgnore(args []string) error {
+	verbose, args := hasFlag(args, "-v", "--verbose")
+	if len(args) == 0 {
+		return fmt.Errorf("usage: lrm check-ignore [-v] <path>...")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	ign := merkle.LoadIgnore(r.Root)
+	matched := 0
+	for _, p := range args {
+		rel := filepath.ToSlash(filepath.Clean(p))
+		if filepath.IsAbs(p) {
+			abs := p
+			r2, err := filepath.Rel(r.Root, abs)
+			if err != nil || !withinRoot(r.Root, abs) {
+				return fmt.Errorf("path %q is outside the repo", p)
+			}
+			rel = filepath.ToSlash(r2)
+		}
+		rel = strings.TrimPrefix(rel, "./")
+		top := rel
+		if i := strings.Index(rel, "/"); i >= 0 {
+			top = rel[:i]
+		}
+		if top == ".lrm" || top == ".git" {
+			matched++
+			if verbose {
+				fmt.Printf("built-in:0:.lrm/.git\t%s\n", rel)
+			} else {
+				fmt.Println(rel)
+			}
+			continue
+		}
+		rule := ign.MatchRule(rel)
+		if rule == nil || rule.Negate {
+			continue
+		}
+		matched++
+		if verbose {
+			fmt.Printf(".lrmignore:%d:%s\t%s\n", rule.Line, rule.Source(), rel)
+		} else {
+			fmt.Println(rel)
+		}
+	}
+	if matched == 0 {
+		return fmt.Errorf("no paths ignored")
+	}
+	return nil
 }

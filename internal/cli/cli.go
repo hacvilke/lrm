@@ -106,6 +106,14 @@ func Run(argv []string) int {
 		err = cmdClean(args)
 	case "describe":
 		err = cmdDescribe(args)
+	case "rev-parse":
+		err = cmdRevParse(args)
+	case "merge-base":
+		err = cmdMergeBase(args)
+	case "cherry":
+		err = cmdCherry(args)
+	case "check-ignore":
+		err = cmdCheckIgnore(args)
 	case "bisect":
 		err = cmdBisect(args)
 	case "ref-log":
@@ -158,6 +166,7 @@ Local engine:
   show [REF]                                show a commit + its patches (REF=head/branch/tag/hash)
   diff [REF1 [REF2]] [--stat]               unified patches (or file list)
   branch [--list] [NAME]                    list / create branches
+  branch -d|-D NAME...                     delete branches (-D = unmerged too)
   checkout <BRANCH>                         switch branch (updates workdir)
   merge <BRANCH|HASH>                       merge into current branch
   cat-file <HASH>                           print a CAS object (small)
@@ -176,7 +185,7 @@ Git-reverse compat (git spellings, P2P standing):
   push [--peer HOST:PORT]                   sync out to peers (no force-push exists)
   pull | fetch [--peer HOST:PORT]            sync in from peers (bidir in one session)
   clone <PORTKEY> [dir]                     verified dial + full history + checkout
-  stash [push|pop|list|show|drop|clear]     shelf / restore workdir deltas
+  stash [push|pop|apply|list|show|drop|clear]  shelf / restore workdir deltas
   reset [--soft|--mixed|--hard] <ref>      move branch ref (± index ± workdir)
   fsck                                      verify CAS reachability from all refs
   gc [--dry-run]                            prune unreachable objects
@@ -198,6 +207,10 @@ Git-reverse compat (git spellings, P2P standing):
   shortlog [REF] [--limit N]                commit counts per author
   mv <SRC> <DST>                            rename a workdir file (tracking is automatic)
   notes add|show|list|remove <REF>           local-only commit annotations (shown by show)
+  rev-parse [--short] [--abbrev-ref] <REF>  print resolved commit hash(es)
+  merge-base <A> <B>                       best common ancestor of two refs
+  cherry <UPSTREAM> [HEAD]                 branch-unique commits (+ missing, - applied)
+  check-ignore [-v] <PATH>...              test .lrmignore rules (-v shows the rule)
 
 Scripting (LRS runtime + LRQ queries):
   run <SCRIPT.lr> [--report PATH] [--timeout 30s] [-- args...]
@@ -726,11 +739,44 @@ func cmdDiff(args []string) error {
 
 func cmdBranch(args []string) error {
 	list, args := hasFlag(args, "--list", "-l")
+	delSafe, args := hasFlag(args, "-d", "--delete")
+	delForce, args := hasFlag(args, "-D")
 	r, err := openRepo()
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	if delSafe || delForce {
+		if len(args) == 0 {
+			return fmt.Errorf("usage: lrm branch -d|-D <name>...")
+		}
+		var failed int
+		var firstErr error
+		for _, name := range args {
+			res, err := gitcompat.DeleteBranch(r, name, delForce)
+			if err != nil {
+				if len(args) > 1 {
+					fmt.Printf("error: %v\n", err)
+				} else {
+					firstErr = err
+				}
+				failed++
+				continue
+			}
+			was := "(was unborn)"
+			if res.Tip != "" {
+				was = fmt.Sprintf("(was %s)", res.Tip[:12])
+			}
+			fmt.Printf("deleted branch %s %s\n", name, was)
+		}
+		if failed > 0 {
+			if firstErr != nil {
+				return firstErr
+			}
+			return fmt.Errorf("could not delete %d branch(es)", failed)
+		}
+		return nil
+	}
 	cur, _ := r.HeadBranch()
 	if list || len(args) == 0 {
 		branches, _ := r.ListBranches()
