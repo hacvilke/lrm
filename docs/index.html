@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="LRM — Log Replication Manager. Hyper-fast, real-time, peer-to-peer version control. No servers.">
+<title>LRM — Log Replication Manager</title>
+<style>
+/* plain old-school stylesheet: no frameworks, no fonts, no requests */
+html { background: #e8e8e8; }
+body {
+  max-width: 820px;
+  margin: 0 auto 3em auto;
+  padding: 0 1em;
+  background: #fff;
+  color: #111;
+  font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  border-left: 1px solid #ccc;
+  border-right: 1px solid #ccc;
+}
+header.top {
+  background: #222;
+  color: #eee;
+  margin: 0 -1em;
+  padding: 1.2em 1em 0.9em 1em;
+}
+header.top h1 { margin: 0; font-size: 1.7em; letter-spacing: 0.04em; }
+header.top h1 .sub { color: #9db8d2; font-weight: normal; font-size: 0.65em; }
+header.top p.tag { margin: 0.4em 0 0.8em 0; color: #bbb; }
+nav { border-top: 1px solid #555; padding-top: 0.6em; font-size: 0.92em; }
+nav a { color: #9db8d2; margin-right: 1em; text-decoration: none; }
+nav a:hover { color: #fff; text-decoration: underline; }
+h2 {
+  font-size: 1.2em;
+  border-bottom: 1px solid #999;
+  padding-bottom: 0.2em;
+  margin-top: 2em;
+}
+a { color: #0645ad; }
+a:visited { color: #0b0080; }
+pre {
+  background: #f4f4f4;
+  border: 1px solid #ccc;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+  font-size: 0.87em;
+  line-height: 1.5;
+}
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+p code, li code, td code { background: #f4f4f4; padding: 0 0.25em; font-size: 0.9em; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.92em; }
+th, td { border: 1px solid #bbb; padding: 0.35em 0.6em; text-align: left; vertical-align: top; }
+th { background: #eee; }
+ul { padding-left: 1.4em; }
+li { margin-bottom: 0.3em; }
+footer {
+  margin: 3em -1em 0 -1em;
+  padding: 0.8em 1em;
+  background: #eee;
+  border-top: 1px solid #ccc;
+  font-size: 0.85em;
+  color: #555;
+}
+.stamp { color: #777; font-size: 0.85em; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>LRM <span class="sub">— Log Replication Manager</span></h1>
+  <p class="tag">Hyper-fast, real-time, peer-to-peer version control. No GitHub. No servers. No storage bills.</p>
+  <nav>
+    <a href="#about">about</a>
+    <a href="#features">features</a>
+    <a href="#quickstart">quickstart</a>
+    <a href="#gitreverse">git-reverse</a>
+    <a href="#docs">docs</a>
+    <a href="#source">source</a>
+    <a href="#roadmap">roadmap</a>
+  </nav>
+</header>
+
+<h2 id="about">about</h2>
+<p>
+LRM lets developers open a repo on their machines, auto-discover teammates over the
+network, and collaborate on code in real time — with zero central authority, zero lag
+(state streams directly peer-to-peer), and absolute privacy (everything is end-to-end
+encrypted and content-addressed).
+</p>
+<pre>Developer A  ◄─── direct P2P (LAN mdns / WAN Port Key) ───►  Developer B
+   .lrm/objects (SHA-256 CAS)         encrypted mux streams        .lrm/objects (SHA-256 CAS)</pre>
+<ul>
+  <li><b>No remotes.</b> Every peer is a full remote; discovery replaces URLs.</li>
+  <li><b>No force-push.</b> History is a content-addressed DAG; concurrent tips coexist as branches until merged.</li>
+  <li><b>No staging ritual.</b> An always-on virtual index tracks every file; <code>commit</code> just versions the Merkle root.</li>
+  <li><b>Pure Go stdlib.</b> One static binary, no dependencies, close to OS primitives.</li>
+</ul>
+
+<h2 id="features">features</h2>
+<table>
+  <tr><th>Area</th><th>What you get</th></tr>
+  <tr><td>Local engine</td><td>Instant parallel Merkle trees, SHA-256 CAS, automatic 4KB–1MB file chunking, unified line diffs</td></tr>
+  <tr><td>P2P mesh</td><td>Zero-config LAN discovery (mDNS + UDP), X25519/Ed25519/AES-GCM encrypted mux, UPnP + NAT-PMP port mapping, STUN, secure Port Key dial strings</td></tr>
+  <tr><td>Sync engine</td><td>Commit DAG + vector clocks, LCA merge-base, have/want negotiation, fast-forward + 3-way auto-merge, conflict branches (<code>HEAD-peer-&lt;short&gt;</code>, never overwrites), append-only replication log, real-time daemon (~2s peer latency)</td></tr>
+  <tr><td>Git-reverse++</td><td><code>blame</code>, <code>cherry-pick</code>, <code>grep</code>, <code>clean</code>, <code>describe</code>, <code>amend</code>, DAG-correct <code>bisect</code>, <code>ref-log</code>, <code>archive</code>, <code>shortlog</code>, <code>rebase</code> (+ continue/abort), <code>notes</code>, <code>.lrmignore</code>, <code>stash</code> (7 verbs), <code>branch -d</code>, <code>rev-parse</code>, <code>merge-base</code>, <code>cherry</code>, <code>check-ignore</code>, <code>~</code>/<code>^</code> ref suffixes</td></tr>
+  <tr><td>Scripting</td><td>LRS runtime language (<code>.lr</code>) + LRQ read-only repo queries (<code>.lrq</code>), both with <code>.txt</code> reports</td></tr>
+</table>
+
+<h2 id="quickstart">60-second quickstart</h2>
+<pre><code># Build
+make build          # produces ./lrm (pure Go stdlib, no dependencies)
+
+# Alice starts a project
+mkdir demo &amp;&amp; cd demo
+lrm init --user alice
+echo "hello LRM" &gt; hello.txt
+lrm commit -m "first commit"
+
+# Same Wi-Fi: Bob finds Alice automatically
+lrm peers                    # → alice @ 192.168.1.5:8443
+lrm daemon                   # background real-time sync (both sides)
+
+# Different Wi-Fi / across the globe: Alice shares a Port Key
+lrm share
+# → lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
+
+# Bob pastes it — router ports auto-open, STUN finds the
+# public IP, and a verified encrypted channel syncs history:
+lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw</code></pre>
+
+<h2 id="gitreverse">git-reverse: your muscle memory still works</h2>
+<p>
+Every git spelling is reversed into P2P standing — same fingers, no central server.
+Full table in the <a href="https://github.com/hacvilke/lrm/blob/main/docs/GIT_REVERSE_MAP.md">reverse map</a>.
+</p>
+<table>
+  <tr><th>You used to</th><th>You now</th></tr>
+  <tr><td><code>git clone URL dir</code></td><td><code>lrm clone &lt;PORTKEY&gt; dir</code> — verified dial + full history + checkout</td></tr>
+  <tr><td><code>git push / pull</code></td><td><code>lrm sync</code> / <code>lrm push</code> / <code>lrm pull</code> — bidirectional, one session</td></tr>
+  <tr><td><code>git stash</code></td><td><code>lrm stash push|pop|apply|list|show|drop|clear</code></td></tr>
+  <tr><td><code>git rebase</code></td><td><code>lrm rebase &lt;UP&gt;</code> (+ <code>--continue</code> / <code>--abort</code>), linear-only, atomic move</td></tr>
+  <tr><td><code>git bisect</code></td><td><code>lrm bisect start BAD [GOOD]</code> + <code>good|bad|skip|run|reset|log</code></td></tr>
+  <tr><td><code>git push --force</code></td><td><i>impossible by design</i> — divergent tips become branches, never overwritten</td></tr>
+  <tr><td>merge conflicts (<code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code>)</td><td><code>HEAD-peer-&lt;short&gt;</code> branches — no markers injected into your files</td></tr>
+</table>
+
+<h2 id="docs">docs</h2>
+<ul>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/README.md">README</a> — feature matrix + full command reference</li>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/GIT_REVERSE_MAP.md">Git → LRM reverse map</a> — every git workflow translated</li>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/ARCHITECTURE.md">Architecture</a> — engine, mesh, and sync design</li>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/PROTOCOL.md">Wire protocol</a> — mux streams and message formats</li>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/WAN_PORTKEY_SPEC.md">Port Key spec</a> — secure dial strings</li>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/LRSPEC.md">LRS spec</a> + <a href="https://github.com/hacvilke/lrm/blob/main/docs/LRQSPEC.md">LRQ spec</a> — scripting and query languages</li>
+</ul>
+
+<h2 id="source">source</h2>
+<pre><code>git clone https://github.com/hacvilke/lrm.git
+cd lrm &amp;&amp; make build &amp;&amp; make test</code></pre>
+<p>
+Project home: <a href="https://github.com/hacvilke/lrm">github.com/hacvilke/lrm</a><br>
+<span class="stamp">Single static binary. No accounts, no telemetry, no tracking — this page itself is one HTML file with no JavaScript and no external requests.</span>
+</p>
+
+<h2 id="roadmap">roadmap</h2>
+<ul>
+  <li>STUN/ICE UDP hole punching for symmetric NATs</li>
+  <li>DHT peer routing (Kademlia) for global discovery without key exchange</li>
+  <li>Delta-compressed object transfer for huge binaries</li>
+  <li>FUSE workdir overlay for instant multi-GB checkouts</li>
+  <li><code>lrm web</code> — local DAG visualizer</li>
+</ul>
+
+<footer>
+  LRM — Log Replication Manager · peer-to-peer version control ·
+  <a href="https://github.com/hacvilke/lrm">source</a>
+</footer>
+
+</body>
+</html>
