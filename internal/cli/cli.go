@@ -102,6 +102,16 @@ func Run(argv []string) int {
 		err = cmdClean(args)
 	case "describe":
 		err = cmdDescribe(args)
+	case "bisect":
+		err = cmdBisect(args)
+	case "ref-log":
+		err = cmdRefLog(args)
+	case "archive":
+		err = cmdArchive(args)
+	case "shortlog":
+		err = cmdShortlog(args)
+	case "mv":
+		err = cmdMv(args)
 	case "run":
 		err = cmdRun(args)
 	case "query", "q":
@@ -176,6 +186,11 @@ Git-reverse compat (git spellings, P2P standing):
   describe [REF]                            nearest tag name (<tag>[-N-g<short>])
   commit --amend [-m MSG]                   fold workdir state into the tip commit
   checkout -b NAME                          create a branch and switch to it
+  bisect start <BAD> [GOOD...]              binary-search history (good|bad|skip|run|reset|log)
+  ref-log [BRANCH] [--last N]               branch-tip move history (vs replog: replication log)
+  archive [REF] -o FILE [--format F]        export snapshot (tar|tar.gz|zip, streaming)
+  shortlog [REF] [--limit N]                commit counts per author
+  mv <SRC> <DST>                            rename a workdir file (tracking is automatic)
 
 Scripting (LRS runtime + LRQ queries):
   run <SCRIPT.lr> [--report PATH] [--timeout 30s] [-- args...]
@@ -202,7 +217,89 @@ func openRepo() (*store.Repo, error) {
 }
 
 // resolveCommitRef maps HEAD/branch/tag/hash-prefix to a commit hash.
+// Trailing ~N (Nth first-parent ancestor) and ^N (Nth parent) suffixes
+// apply in order, git-style: HEAD~3, main^2, v1~1^2.
 func resolveCommitRef(r *store.Repo, ref string) (cas.Hash, error) {
+	base, suffixes := splitRefSuffix(ref)
+	h, err := resolveCommitBase(r, base)
+	if err != nil {
+		return cas.Nil, err
+	}
+	for _, s := range suffixes {
+		c, err := r.DAG.Get(h)
+		if err != nil {
+			return cas.Nil, err
+		}
+		switch s.op {
+		case '~':
+			for i := 0; i < s.n; i++ {
+				if len(c.Parents) == 0 {
+					return cas.Nil, fmt.Errorf("ref %q: no first parent %d step(s) back", ref, s.n)
+				}
+				h, err = cas.ParseHex(c.Parents[0])
+				if err != nil {
+					return cas.Nil, err
+				}
+				c, err = r.DAG.Get(h)
+				if err != nil {
+					return cas.Nil, err
+				}
+			}
+		case '^':
+			if s.n == 0 {
+				break // rev^0 is rev itself (git parity)
+			}
+			if s.n < 1 || s.n > len(c.Parents) {
+				return cas.Nil, fmt.Errorf("ref %q: parent ^%d out of range (%d parent(s))", ref, s.n, len(c.Parents))
+			}
+			h, err = cas.ParseHex(c.Parents[s.n-1])
+			if err != nil {
+				return cas.Nil, err
+			}
+		}
+	}
+	return h, nil
+}
+
+// refSuffix is one parsed ~N/^N step.
+type refSuffix struct {
+	op byte
+	n  int
+}
+
+// splitRefSuffix splits "main~2^1" into ("main", [~2, ^1]).
+// A bare ~ or ^ means 1. Stops at the first non-suffix char from the right.
+func splitRefSuffix(ref string) (string, []refSuffix) {
+	var suffixes []refSuffix
+	rest := ref
+	for len(rest) > 0 {
+		// Peel [digits] then [~^] from the right.
+		i := len(rest)
+		for i > 0 && rest[i-1] >= '0' && rest[i-1] <= '9' {
+			i--
+		}
+		digits := rest[i:]
+		if i == 0 || (rest[i-1] != '~' && rest[i-1] != '^') {
+			break
+		}
+		op := rest[i-1]
+		rest = rest[:i-1]
+		n := 1
+		if digits != "" {
+			fmt.Sscanf(digits, "%d", &n)
+			if n < 0 {
+				n = 0
+			}
+		}
+		suffixes = append([]refSuffix{{op: op, n: n}}, suffixes...)
+	}
+	if rest == "" {
+		rest = "HEAD" // "~3" alone means HEAD~3
+	}
+	return rest, suffixes
+}
+
+func resolveCommitBase(r *store.Repo, ref string) (cas.Hash, error) {
 	if ref == "" || ref == "HEAD" {
 		h, _, err := r.HeadCommit()
 		if err != nil {
@@ -624,9 +721,11 @@ func cmdBranch(args []string) error {
 		return fmt.Errorf("branch name required")
 	}
 	tipHex, _ := r.GetRef(cur)
+	oldHex, _ := r.GetRef(name)
 	if err := r.SetRef(name, tipHex); err != nil {
 		return err
 	}
+	r.AppendReflog(name, oldHex, tipHex, "branch", "created at "+shortOrUnborn(tipHex))
 	fmt.Printf("created branch %s at %s\n", name, shortOrUnborn(tipHex))
 	return nil
 }
@@ -663,6 +762,7 @@ func cmdCheckout(args []string) error {
 			if err := r.SetRef(name, cas.Hex(curTip)); err != nil {
 				return err
 			}
+			r.AppendReflog(name, "", cas.Hex(curTip), "branch", "created via checkout -b")
 		}
 		if err := r.SetHeadBranch(name); err != nil {
 			return err

@@ -46,9 +46,11 @@ func Amend(r *store.Repo, message string) (cas.Hash, error) {
 	if err != nil {
 		return cas.Nil, err
 	}
+	oldHex, _ := r.GetRef(branch)
 	if err := r.SetRef(branch, cas.Hex(h)); err != nil {
 		return cas.Nil, err
 	}
+	r.AppendReflog(branch, oldHex, cas.Hex(h), "amend", message)
 	_ = r.Index.UpdateFromScan(r.Root, r.CAS, res.RootHash)
 	_ = r.Index.Save()
 	_, _ = r.Replog.Append(replog.Entry{

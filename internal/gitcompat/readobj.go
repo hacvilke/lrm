@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/chunker"
@@ -86,4 +87,26 @@ func TreeAtCommit(r *store.Repo, commit cas.Hash) (map[string]string, error) {
 		return nil, err
 	}
 	return flat, nil
+}
+
+// WriteObjectTo streams a blob or chunked file to w (no size cap —
+// the archive path stays streaming no matter how large the file).
+func WriteObjectTo(cs *cas.Store, h cas.Hash, w io.Writer) error {
+	raw, err := cs.GetBytes(h, 4<<20)
+	if err != nil {
+		// Too big for the peek window to be a manifest: raw stream.
+		rc, err := cs.Get(h)
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		_, err = io.Copy(w, rc)
+		return err
+	}
+	var m chunker.Manifest
+	if json.Unmarshal(raw, &m) == nil && m.Version == 1 && len(m.Chunks) > 0 && m.ChunkSize > 0 {
+		return chunker.Reassemble(cs, &m, w)
+	}
+	_, err = w.Write(raw)
+	return err
 }

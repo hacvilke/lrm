@@ -366,6 +366,7 @@ func (r *Repo) Commit(message string, rootHash cas.Hash) (cas.Hash, *dag.Commit,
 	if err := r.SetRef(br, cas.Hex(h)); err != nil {
 		return cas.Nil, nil, err
 	}
+	r.AppendReflog(br, tipHex, cas.Hex(h), "commit", message)
 	_, _ = r.Replog.Append(replog.Entry{
 		Type: replog.TypeCommit, PeerHex: r.Identity.HexID(),
 		Commit: cas.Hex(h), Message: message, Clock: clock.Clone(),

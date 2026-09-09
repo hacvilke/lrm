@@ -30,6 +30,7 @@ func MergeLocal(r *store.Repo, remoteTip cas.Hash, remoteName string) (*LocalMer
 		if err := r.SetRef(localBranch, cas.Hex(remoteTip)); err != nil {
 			return nil, err
 		}
+		r.AppendReflog(localBranch, "", cas.Hex(remoteTip), "merge", "adopted "+remoteName)
 		if err := Checkout(r, remoteTip); err != nil {
 			return nil, err
 		}
@@ -50,9 +51,11 @@ func MergeLocal(r *store.Repo, remoteTip cas.Hash, remoteName string) (*LocalMer
 		return res, nil
 	}
 	if base == localTip {
+		oldHex, _ := r.GetRef(localBranch)
 		if err := r.SetRef(localBranch, cas.Hex(remoteTip)); err != nil {
 			return nil, err
 		}
+		r.AppendReflog(localBranch, oldHex, cas.Hex(remoteTip), "merge", "fast-forward to "+remoteName)
 		if err := Checkout(r, remoteTip); err != nil {
 			return nil, err
 		}
@@ -87,9 +90,11 @@ func MergeLocal(r *store.Repo, remoteTip cas.Hash, remoteName string) (*LocalMer
 	if err != nil {
 		return nil, err
 	}
+	oldHex, _ := r.GetRef(localBranch)
 	if err := r.SetRef(localBranch, cas.Hex(h)); err != nil {
 		return nil, err
 	}
+	r.AppendReflog(localBranch, oldHex, cas.Hex(h), "merge", "merged "+remoteName)
 	if err := Checkout(r, h); err != nil {
 		return nil, err
 	}

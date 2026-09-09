@@ -302,22 +302,38 @@ func writeObjectToFile(r *store.Repo, h cas.Hash, dst string) error {
 
 // ResetSoft moves the current branch ref to target (workdir + index untouched).
 func ResetSoft(r *store.Repo, target cas.Hash) error {
-	br, err := r.HeadBranch()
+	br, old, err := resetMove(r, target)
 	if err != nil {
 		return err
 	}
-	if !r.DAG.Has(target) {
-		return fmt.Errorf("unknown commit %s", cas.Short(target))
+	r.AppendReflog(br, old, cas.Hex(target), "reset --soft", "to "+cas.Short(target))
+	return nil
+}
+
+// resetMove moves the current branch ref (unlogged; callers log the mode).
+func resetMove(r *store.Repo, target cas.Hash) (string, string, error) {
+	br, err := r.HeadBranch()
+	if err != nil {
+		return "", "", err
 	}
-	return r.SetRef(br, cas.Hex(target))
+	if !r.DAG.Has(target) {
+		return "", "", fmt.Errorf("unknown commit %s", cas.Short(target))
+	}
+	old, _ := r.GetRef(br)
+	if err := r.SetRef(br, cas.Hex(target)); err != nil {
+		return "", "", err
+	}
+	return br, old, nil
 }
 
 // ResetMixed moves the ref AND refreshes the index to the target tree
 // (workdir untouched — changes appear as deltas, like git reset --mixed).
 func ResetMixed(r *store.Repo, target cas.Hash) error {
-	if err := ResetSoft(r, target); err != nil {
+	br, old, err := resetMove(r, target)
+	if err != nil {
 		return err
 	}
+	r.AppendReflog(br, old, cas.Hex(target), "reset --mixed", "to "+cas.Short(target))
 	c, err := r.DAG.Get(target)
 	if err != nil {
 		return err
@@ -331,9 +347,11 @@ func ResetMixed(r *store.Repo, target cas.Hash) error {
 
 // ResetHard moves the ref and rewrites the workdir to the target tree.
 func ResetHard(r *store.Repo, target cas.Hash) error {
-	if err := ResetSoft(r, target); err != nil {
+	br, old, err := resetMove(r, target)
+	if err != nil {
 		return err
 	}
+	r.AppendReflog(br, old, cas.Hex(target), "reset --hard", "to "+cas.Short(target))
 	return sync.Checkout(r, target)
 }
 

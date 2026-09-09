@@ -32,6 +32,12 @@ into a peer-to-peer equivalent. This is the complete translation table.
 | `git describe` | `lrm describe [REF]` | nearest reachable tag (`v1-3-g<short>`); BFS over all parents |
 | `git commit --amend` | `lrm commit --amend [-m MSG]` | folds workdir into tip (same parents; old tip unreferenced) |
 | `git checkout -b N` | `lrm checkout -b N` | create + switch in one step |
+| `git bisect` | `lrm bisect start BAD [GOOD]`, `good/bad/skip`, `run CMD`, `reset`, `log` | DAG-correct suspect-set narrowing; rides a scratch branch (no detached HEAD); exit 125 = skip |
+| `git reflog` | `lrm ref-log [BRANCH]` | per-branch tip-move history (`reflog` stays the replication log); recovers amended/reset-away tips |
+| `git archive` | `lrm archive [REF] -o FILE` | tar/tar.gz/zip, fully streaming, commit-timestamped entries |
+| `git shortlog -sn` | `lrm shortlog [REF]` | commit counts per author |
+| `git mv A B` | `lrm mv A B` | workdir rename (tracking follows automatically); refuses escapes/overwrites |
+| `HEAD~N`, `REV^N` | same spellings | suffixes work in `show`/`diff`/`reset`/`describe`/`archive`/`blame`/`cherry-pick` — anywhere a ref resolves |
 | `git cat-file -p H` | `lrm cat-file H` | prints blobs / manifests / trees / commits |
 | `git fsck` | `lrm fsck` | verifies CAS reachability from all refs (compat layer) |
 | `git gc` | `lrm gc` | drops objects unreachable from refs + replog window (compat layer) |

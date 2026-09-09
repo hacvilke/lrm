@@ -62,6 +62,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Replication log (append-only JSONL audit trail) | ✅ |
 | | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
 | **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
+| | `bisect` (DAG-correct), `ref-log`, `archive`, `shortlog`, `mv`, `~`/`^` ref suffixes | ✅ |
 | **4 — Scripting** | LRS runtime language (`.lr`): sharing + site/network tests, `.txt` reports | ✅ |
 | | LRQ query language (`.lrq`): 8 read-only repo queries, `.txt` reports | ✅ |
 | | `lrm run` / `lrm query` + bare `lrm file.lr` dispatch, tag delete | ✅ |
@@ -106,6 +107,11 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm describe [REF]` | nearest tag (`v1-3-g<short>`) |
 | `lrm commit --amend [-m MSG]` | fold workdir state into the tip commit |
 | `lrm checkout -b NAME` | create a branch and switch to it |
+| `lrm bisect start BAD [GOOD]` + `good\|bad\|skip` / `run CMD` / `reset` / `log` | binary-search history for the first bad commit |
+| `lrm ref-log [BRANCH] [--last N]` | branch-tip move history (recover amended tips) |
+| `lrm archive [REF] -o FILE [--format F]` | export snapshot (tar\|tar.gz\|zip, streaming) |
+| `lrm shortlog [REF] [--limit N]` | commit counts per author |
+| `lrm mv <SRC> <DST>` | rename a workdir file |
 | `lrm tag [NAME [HASH]]` | list / create lightweight tags |
 | `lrm tag -d NAME` | delete a tag |
 | `lrm run <S.lr> [--report P] [--timeout D] [-- args]` | run an LRS script, export `.txt` report |

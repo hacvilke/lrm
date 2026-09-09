@@ -5,9 +5,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lrm-project/lrm/internal/cas"
@@ -601,4 +604,265 @@ func cmdDescribe(args []string) error {
 	}
 	fmt.Println(name)
 	return nil
+}
+
+func cmdBisect(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: lrm bisect start <bad> [good...] | good|bad|skip [ref] | run <cmd...> | reset | log")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	sub := args[0]
+	rest := args[1:]
+	resolve := func(ref string) (cas.Hash, error) { return resolveCommitRef(r, ref) }
+	switch sub {
+	case "start":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: lrm bisect start <bad> [good...]")
+		}
+		bad, err := resolve(rest[0])
+		if err != nil {
+			return err
+		}
+		var goods []cas.Hash
+		for _, g := range rest[1:] {
+			gh, err := resolve(g)
+			if err != nil {
+				return err
+			}
+			goods = append(goods, gh)
+		}
+		step, err := gitcompat.BisectStart(r, bad, goods)
+		if err != nil {
+			return err
+		}
+		fmt.Println(step.Message)
+		return nil
+	case "good", "bad", "skip":
+		if len(rest) > 1 {
+			return fmt.Errorf("usage: lrm bisect %s [ref]", sub)
+		}
+		var ref cas.Hash
+		hasRef := false
+		if len(rest) == 1 {
+			ref, err = resolve(rest[0])
+			if err != nil {
+				return err
+			}
+			hasRef = true
+		}
+		step, err := gitcompat.BisectMark(r, sub, ref, hasRef)
+		if err != nil {
+			return err
+		}
+		fmt.Println(step.Message)
+		return nil
+	case "run":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: lrm bisect run <command...>")
+		}
+		step, err := gitcompat.BisectRun(r, rest, func(s string) {
+			if s != "" {
+				fmt.Println(s)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		_ = step
+		return nil
+	case "reset":
+		br, err := gitcompat.BisectReset(r)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("bisect reset — back on %s\n", br)
+		return nil
+	case "log":
+		// read-only peek requires an active session; reuse mark plumbing
+		return cmdBisectLog(r)
+	}
+	return fmt.Errorf("unknown bisect subcommand %q", sub)
+}
+
+func cmdBisectLog(r *store.Repo) error {
+	raw, err := os.ReadFile(filepath.Join(r.LrmDir, "BISECT_STATE"))
+	if err != nil {
+		return fmt.Errorf("no bisect in progress")
+	}
+	var a struct {
+		OrigBranch string            `json:"orig_branch"`
+		Bad        string            `json:"bad"`
+		Good       []string          `json:"good"`
+		Tested     map[string]string `json:"tested"`
+		Current    string            `json:"current"`
+		Concluded  string            `json:"concluded,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return err
+	}
+	fmt.Printf("orig: %s  bad: %s  current: %s\n", a.OrigBranch, shortHex(a.Bad), shortHex(a.Current))
+	for _, g := range a.Good {
+		fmt.Printf("  good: %s\n", shortHex(g))
+	}
+	for hx, v := range a.Tested {
+		if v == "skip" {
+			fmt.Printf("  skip: %s\n", shortHex(hx))
+		}
+	}
+	if a.Concluded != "" {
+		fmt.Printf("concluded: first bad = %s\n", shortHex(a.Concluded))
+	}
+	return nil
+}
+
+func cmdRefLog(args []string) error {
+	limitStr, args := flagVal(args, "--last", "-n")
+	limit := 20
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	branch := ""
+	if len(args) > 1 {
+		return fmt.Errorf("usage: lrm ref-log [branch] [--last N]")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if len(args) == 1 {
+		branch = args[0]
+	} else {
+		branch, _ = r.HeadBranch()
+	}
+	ents, err := r.ReadReflog(branch, limit)
+	if err != nil {
+		return err
+	}
+	if len(ents) == 0 {
+		fmt.Printf("(no ref history for %s yet — moves are recorded from here on)\n", branch)
+		return nil
+	}
+	for _, e := range ents {
+		old := shortHex(e.OldHex)
+		if e.OldHex == store.ZeroHex {
+			old = "(born)"
+		}
+		fmt.Printf("%s  %s -> %s  %-12s %s\n",
+			e.Time.Format("2006-01-02 15:04"), old, shortHex(e.NewHex), e.Action, e.Detail)
+	}
+	return nil
+}
+
+func cmdArchive(args []string) error {
+	out, args := flagVal(args, "-o", "--output")
+	format, args := flagVal(args, "--format")
+	ref := "HEAD"
+	if len(args) > 1 {
+		return fmt.Errorf("usage: lrm archive [ref] -o FILE [--format tar|tar.gz|zip]")
+	}
+	if len(args) == 1 {
+		ref = args[0]
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	h, err := resolveCommitRef(r, ref)
+	if err != nil {
+		return err
+	}
+	if out == "" {
+		out = fmt.Sprintf("archive-%s.tar.gz", cas.Hex(h)[:12])
+	}
+	if format == "" {
+		format = gitcompat.GuessFormat(out)
+	}
+	if format == "" {
+		format = "tar.gz"
+	}
+	if err := gitcompat.Archive(r, h, format, out); err != nil {
+		return err
+	}
+	fmt.Printf("archived %s → %s (%s)\n", cas.Short(h), out, format)
+	return nil
+}
+
+func cmdShortlog(args []string) error {
+	limitStr, args := flagVal(args, "--limit", "-n")
+	limit := 0
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if len(args) > 1 {
+		return fmt.Errorf("usage: lrm shortlog [ref] [--limit N]")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	ref := "HEAD"
+	if len(args) == 1 {
+		ref = args[0]
+	}
+	h, err := resolveCommitRef(r, ref)
+	if err != nil {
+		return err
+	}
+	rows, err := gitcompat.Shortlog(r, h, limit)
+	if err != nil {
+		return err
+	}
+	for _, ac := range rows {
+		fmt.Printf("%5d\t%s\n", ac.Commits, ac.Author)
+	}
+	return nil
+}
+
+func cmdMv(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: lrm mv <src> <dst>")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	src := filepath.Join(r.Root, filepath.FromSlash(args[0]))
+	dst := filepath.Join(r.Root, filepath.FromSlash(args[1]))
+	if !withinRoot(r.Root, src) || !withinRoot(r.Root, dst) {
+		return fmt.Errorf("paths must stay inside the repo")
+	}
+	if _, err := os.Lstat(src); err != nil {
+		return fmt.Errorf("no such file %q", args[0])
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("destination %q already exists", args[1])
+	}
+	if _, err := os.Stat(filepath.Dir(dst)); err != nil {
+		return fmt.Errorf("destination directory does not exist (create it first)")
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return err
+	}
+	fmt.Printf("renamed %s -> %s\n", args[0], args[1])
+	return nil
+}
+
+func withinRoot(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

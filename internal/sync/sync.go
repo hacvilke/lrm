@@ -411,6 +411,7 @@ func (e *Engine) integrate(remoteTip cas.Hash, remotePeer string, localTip cas.H
 		if err := e.Repo.SetRef(localBranch, cas.Hex(remoteTip)); err != nil {
 			return err
 		}
+		e.Repo.AppendReflog(localBranch, "", cas.Hex(remoteTip), "sync", "adopted from "+shortHexStr(remotePeer))
 		if err := Checkout(e.Repo, remoteTip); err != nil {
 			return err
 		}
@@ -430,9 +431,11 @@ func (e *Engine) integrate(remoteTip cas.Hash, remotePeer string, localTip cas.H
 	}
 	if base == localTip {
 		// Fast-forward.
+		oldHex, _ := e.Repo.GetRef(localBranch)
 		if err := e.Repo.SetRef(localBranch, cas.Hex(remoteTip)); err != nil {
 			return err
 		}
+		e.Repo.AppendReflog(localBranch, oldHex, cas.Hex(remoteTip), "sync", "fast-forward from "+shortHexStr(remotePeer))
 		// Update working dir + index.
 		rc, _ := e.Repo.DAG.Get(remoteTip)
 		th, _ := cas.ParseHex(rc.Tree)
@@ -460,9 +463,11 @@ func (e *Engine) integrate(remoteTip cas.Hash, remotePeer string, localTip cas.H
 		return err
 	}
 	_ = mergeC
+	oldHex, _ := e.Repo.GetRef(localBranch)
 	if err := e.Repo.SetRef(localBranch, cas.Hex(mh)); err != nil {
 		return err
 	}
+	e.Repo.AppendReflog(localBranch, oldHex, cas.Hex(mh), "sync", "auto-merged "+cas.Short(remoteTip))
 	if err := Checkout(e.Repo, mh); err != nil {
 		return err
 	}
@@ -470,6 +475,14 @@ func (e *Engine) integrate(remoteTip cas.Hash, remotePeer string, localTip cas.H
 	res.Message = "auto-merged " + cas.Short(remoteTip)
 	_, _ = e.Repo.Replog.Append(replog.Entry{Type: replog.TypeMerge, PeerHex: remotePeer, Commit: cas.Hex(mh), Message: res.Message})
 	return nil
+}
+
+// shortHexStr truncates a hex id for display (defensive on length).
+func shortHexStr(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 // conflictBranch records the remote tip on HEAD-peer-<short> without
@@ -480,9 +493,11 @@ func (e *Engine) conflictBranch(remoteTip cas.Hash, remotePeer, localBranch stri
 		short = short[:8]
 	}
 	name := "HEAD-peer-" + short
+	oldHex, _ := e.Repo.GetRef(name)
 	if err := e.Repo.SetRef(name, cas.Hex(remoteTip)); err != nil {
 		return err
 	}
+	e.Repo.AppendReflog(name, oldHex, cas.Hex(remoteTip), "sync", "conflict branch ("+reason+")")
 	res.ConflictBranch = name
 	res.Message = "concurrent edits → conflict branch " + name + " (" + reason + ")"
 	_, _ = e.Repo.Replog.Append(replog.Entry{
