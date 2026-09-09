@@ -1,0 +1,13 @@
+# repo.lrq — read-only repo inspection. Run with:
+#   lrm query repo.lrq        (or: lrm repo.lrq)
+# A timestamped repo_query_*.txt report is exported every run.
+
+status;
+branches;
+tags;
+commits on main limit 10;
+files at main limit 50;
+files at main path like "*.md" limit 20;
+find "todo" in main;
+show main;
+peers;

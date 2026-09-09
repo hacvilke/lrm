@@ -303,6 +303,13 @@ func cmdTag(args []string) error {
 		return err
 	}
 	defer r.Close()
+	if len(args) == 2 && (args[0] == "-d" || args[0] == "--delete") {
+		if err := r.DeleteTag(args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("deleted tag %s\n", args[1])
+		return nil
+	}
 	if len(args) == 0 {
 		tags, err := gitcompat.TagList(r)
 		if err != nil {

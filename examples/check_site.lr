@@ -1,0 +1,47 @@
+// check_site.lr — test that a site (or local service) is up and correct.
+//
+// Usage:
+//   lrm run check_site.lr -- https://example.com
+//   lrm run check_site.lr -- http://127.0.0.1:8000 health
+//
+// Every run exports a timestamped check_site_report_*.txt with the
+// network log, assertion results, and verdict.
+let argv = args();
+if len(argv) == 0 {
+  print("usage: lrm run check_site.lr -- <url> [must_contain]");
+  fail("missing url argument");
+}
+let url = argv[0];
+let needle = "";
+if len(argv) > 1 {
+  needle = argv[1];
+}
+
+log("probing " + url);
+
+// 1. DNS resolves (skip for literal IPs).
+let host = split(split(url, "://")[1], "/")[0];
+let bare = split(host, ":")[0];
+if contains(bare, ".") {
+  let dns = dns_lookup(bare);
+  assert(dns.ok, "dns resolves " + bare);
+}
+
+// 2. HTTP fetch.
+let r = http_get(url, 10000);
+assert(r.ok, "http fetch ok");
+if r.ok {
+  assert(r.status == 200, "status is 200");
+  log("status=" + str(r.status) + " latency=" + str(r.latency_ms) + "ms");
+  if needle != "" {
+    assert(contains(r.body, needle), "body contains " + needle);
+  }
+}
+
+// 3. TLS port reachable when https.
+if contains(url, "https://") {
+  let t = tcp_connect(bare, 443, 5000);
+  assert(t.ok, "tcp 443 reachable");
+}
+
+print("done: " + url);

@@ -224,6 +224,95 @@ func (r *Repo) ListBranches() ([]string, error) {
 	return out, nil
 }
 
+// --- tags (lightweight: name -> commit hash) ---
+
+// validTagName rejects empty names and path tricks.
+func validTagName(name string) bool {
+	if name == "" || name == "." || name == ".." {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\") || strings.HasPrefix(name, ".") {
+		return false
+	}
+	return true
+}
+
+// CreateTag points name at targetHex (must be an existing commit).
+func (r *Repo) CreateTag(name, targetHex string) error {
+	if !validTagName(name) {
+		return fmt.Errorf("invalid tag name %q", name)
+	}
+	h, err := cas.ParseHex(targetHex)
+	if err != nil {
+		return fmt.Errorf("bad target %q: %w", targetHex, err)
+	}
+	if !r.DAG.Has(h) {
+		return fmt.Errorf("target %q is not a known commit", targetHex)
+	}
+	dir := filepath.Join(r.LrmDir, "refs", "tags")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	p := filepath.Join(dir, name)
+	if _, err := os.Stat(p); err == nil {
+		return fmt.Errorf("tag %q already exists", name)
+	}
+	return os.WriteFile(p, []byte(targetHex+"\n"), 0o644)
+}
+
+// DeleteTag removes a tag.
+func (r *Repo) DeleteTag(name string) error {
+	if !validTagName(name) {
+		return fmt.Errorf("invalid tag name %q", name)
+	}
+	p := filepath.Join(r.LrmDir, "refs", "tags", name)
+	if err := os.Remove(p); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no such tag %q", name)
+		}
+		return err
+	}
+	return nil
+}
+
+// GetTag returns the target hash hex of a tag ("" if missing).
+func (r *Repo) GetTag(name string) (string, error) {
+	if !validTagName(name) {
+		return "", nil
+	}
+	raw, err := os.ReadFile(filepath.Join(r.LrmDir, "refs", "tags", name))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
+// ListTags returns name -> target-hex for all tags.
+func (r *Repo) ListTags() (map[string]string, error) {
+	out := map[string]string{}
+	ents, err := os.ReadDir(filepath.Join(r.LrmDir, "refs", "tags"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, err
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(r.LrmDir, "refs", "tags", e.Name()))
+		if err != nil {
+			continue
+		}
+		out[e.Name()] = strings.TrimSpace(string(raw))
+	}
+	return out, nil
+}
+
 // HeadCommit returns the current branch tip hash (Nil if unborn).
 func (r *Repo) HeadCommit() (cas.Hash, string, error) {
 	br, err := r.HeadBranch()

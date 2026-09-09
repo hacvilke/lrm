@@ -61,6 +61,9 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Automated conflict branching (`HEAD-peer-<short>`, never overwrites) | ✅ |
 | | Replication log (append-only JSONL audit trail) | ✅ |
 | | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
+| **4 — Scripting** | LRS runtime language (`.lr`): sharing + site/network tests, `.txt` reports | ✅ |
+| | LRQ query language (`.lrq`): 8 read-only repo queries, `.txt` reports | ✅ |
+| | `lrm run` / `lrm query` + bare `lrm file.lr` dispatch, tag delete | ✅ |
 | **2.5 — Readability** | Unified patches in `diff`/`show` (binary/large-file safe, 1 MiB cap) | ✅ |
 | | ASCII DAG `log --graph` + `log --oneline` | ✅ |
 | | `share` warns when no local listener serves the port | ✅ |
@@ -95,6 +98,10 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm gc [--dry-run]` | prune unreachable objects |
 | `lrm remote -v` | list LIVE peers (there is nothing to configure) |
 | `lrm tag [NAME [HASH]]` | list / create lightweight tags |
+| `lrm tag -d NAME` | delete a tag |
+| `lrm run <S.lr> [--report P] [--timeout D] [-- args]` | run an LRS script, export `.txt` report |
+| `lrm query <Q.lrq> [--report P]` | run LRQ repo queries, export `.txt` report |
+| `lrm <file.lr \| file.lrq>` | bare form: run script / queries directly |
 
 Git users: see [`docs/GIT_REVERSE_MAP.md`](docs/GIT_REVERSE_MAP.md) — every git
 workflow reversed into its LRM equivalent (`push`→`share`/`sync`,
@@ -105,6 +112,8 @@ workflow reversed into its LRM equivalent (`push`→`share`/`sync`,
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design, repo layout, data flow
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — wire protocol (handshake, mux frames, sync messages)
 - [`docs/WAN_PORTKEY_SPEC.md`](docs/WAN_PORTKEY_SPEC.md) — cross-Wi-Fi Port Key + UPnP/NAT-PMP/STUN spec
+- [`docs/LRSPEC.md`](docs/LRSPEC.md) — LRS script language (types, builtins, reports)
+- [`docs/LRQSPEC.md`](docs/LRQSPEC.md) — LRQ query language (8 query kinds, refs, tables)
 
 ## Engineering guardrails (enforced)
 
@@ -143,7 +152,10 @@ internal/
   patch/            unified-patch builder (bounded, binary/large aware)
   gitcompat/        git-reverse layer: stash, reset, fsck, gc, tag, add
   cli/              command implementations (incl. push/pull/clone/remote)
-docs/               architecture, protocol, WAN spec, git map
+  lr/               LRS interpreter: lexer, parser, eval, stdlib, reports
+  lrq/              LRQ engine: query parser, tables, repo reads
+docs/               architecture, protocol, WAN spec, git map, LR/LRQ specs
+examples/           check_site.lr, share_team.lr, repo.lrq
 ```
 
 ## Testing

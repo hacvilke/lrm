@@ -89,14 +89,26 @@ func Run(argv []string) int {
 		err = cmdRemote(args)
 	case "tag":
 		err = cmdTag(args)
+	case "run":
+		err = cmdRun(args)
+	case "query", "q":
+		err = cmdQuery(args)
 	case "version", "-V", "--version":
 		fmt.Println("lrm version 0.1.0 (sprint build)")
 	case "help", "-h", "--help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
-		usage()
-		return 2
+		// Bare script dispatch: `lrm check.lr` / `lrm repo.lrq`.
+		switch {
+		case strings.HasSuffix(cmd, ".lr"):
+			err = cmdRun(append([]string{cmd}, args...))
+		case strings.HasSuffix(cmd, ".lrq"):
+			err = cmdQuery(append([]string{cmd}, args...))
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", cmd)
+			usage()
+			return 2
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -142,6 +154,13 @@ Git-reverse compat (git spellings, P2P standing):
   gc [--dry-run]                            prune unreachable objects
   remote -v                                 list LIVE peers (nothing to configure)
   tag [NAME [HASH]]                         list / create lightweight tags
+  tag -d NAME                               delete a tag
+
+Scripting (LRS runtime + LRQ queries):
+  run <SCRIPT.lr> [--report PATH] [--timeout 30s] [-- args...]
+                                            execute a script, export .txt report
+  query <QUERIES.lrq> [--report PATH]       run read-only repo queries
+  <file.lr> | <file.lrq>                    bare form: lrm check.lr
 
 Examples:
   lrm init --user alice
