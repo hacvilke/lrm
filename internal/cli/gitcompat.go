@@ -389,3 +389,216 @@ func dialAndSync(r *store.Repo, addr string, expectPeerID []byte) (*sync.SyncRes
 	defer sess.Close()
 	return sync.New(r).SyncWithSession(sess, true, "")
 }
+
+func cmdBlame(args []string) error {
+	if len(args) == 0 || len(args) > 2 {
+		return fmt.Errorf("usage: lrm blame <file> [ref]")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	ref := "HEAD"
+	if len(args) == 2 {
+		ref = args[1]
+	}
+	h, err := resolveCommitRef(r, ref)
+	if err != nil {
+		return err
+	}
+	lines, err := gitcompat.Blame(r, h, filepath.ToSlash(args[0]))
+	if err != nil {
+		return err
+	}
+	for _, b := range lines {
+		fmt.Println(gitcompat.FormatBlame(b))
+	}
+	return nil
+}
+
+func cmdPick(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: lrm cherry-pick <ref>")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	h, err := resolveCommitRef(r, args[0])
+	if err != nil {
+		return err
+	}
+	res, err := gitcompat.CherryPick(r, h)
+	if err != nil {
+		return err
+	}
+	fmt.Println(res.Message)
+	return nil
+}
+
+func cmdGrep(args []string) error {
+	ci, args := hasFlag(args, "-i", "--ignore-case")
+	filesOnly, args := hasFlag(args, "-l", "--files-with-matches")
+	if len(args) == 0 || len(args) > 2 {
+		return fmt.Errorf("usage: lrm grep [-i] [-l] <pattern> [ref]")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	pattern := args[0]
+	var res *gitcompat.GrepResult
+	if len(args) == 2 {
+		h, err := resolveCommitRef(r, args[1])
+		if err != nil {
+			return err
+		}
+		res, err = gitcompat.GrepRef(r, h, pattern, ci)
+		if err != nil {
+			return err
+		}
+	} else {
+		res, err = gitcompat.GrepWorkdir(r, pattern, ci)
+		if err != nil {
+			return err
+		}
+	}
+	if filesOnly {
+		seen := map[string]bool{}
+		for _, m := range res.Matches {
+			if !seen[m.Path] {
+				seen[m.Path] = true
+				fmt.Println(m.Path)
+			}
+		}
+	} else {
+		for _, m := range res.Matches {
+			fmt.Printf("%s:%d:%s\n", m.Path, m.Lineno, m.Text)
+		}
+	}
+	if res.Truncated {
+		fmt.Fprintf(os.Stderr, "(match list truncated at %d)\n", gitcompat.MaxGrepMatches)
+	}
+	if res.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "(%d file(s) skipped: too large or binary)\n", res.Skipped)
+	}
+	if len(res.Matches) == 0 {
+		return fmt.Errorf("no matches for %q", pattern)
+	}
+	return nil
+}
+
+func cmdConfig(args []string) error {
+	list, args := hasFlag(args, "--list", "-l")
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if list || len(args) == 0 {
+		fmt.Printf("user=%s\nport=%d\npeer=%s\n", r.Config.User, r.Config.Port, r.Identity.ShortID())
+		return nil
+	}
+	key := args[0]
+	if len(args) == 1 {
+		switch key {
+		case "user":
+			fmt.Println(r.Config.User)
+		case "port":
+			fmt.Println(r.Config.Port)
+		case "peer":
+			fmt.Println(r.Identity.HexID())
+		default:
+			return fmt.Errorf("unknown key %q (want user|port|peer)", key)
+		}
+		return nil
+	}
+	if len(args) != 2 {
+		return fmt.Errorf("usage: lrm config [--list] [user|port [value]]")
+	}
+	switch key {
+	case "user":
+		if err := r.SetUser(args[1]); err != nil {
+			return err
+		}
+	case "port":
+		var port int
+		if _, err := fmt.Sscanf(args[1], "%d", &port); err != nil {
+			return fmt.Errorf("port must be a number")
+		}
+		if err := r.SetPort(port); err != nil {
+			return err
+		}
+	case "peer":
+		return fmt.Errorf("peer id is immutable (it is your cryptographic identity)")
+	default:
+		return fmt.Errorf("unknown key %q (want user|port)", key)
+	}
+	if err := r.SaveConfig(); err != nil {
+		return err
+	}
+	fmt.Printf("%s=%s\n", key, args[1])
+	return nil
+}
+
+func cmdClean(args []string) error {
+	dry, args := hasFlag(args, "-n", "--dry-run")
+	force, args := hasFlag(args, "-f", "--force")
+	withDirs, args := hasFlag(args, "-d", "--dir")
+	if len(args) != 0 {
+		return fmt.Errorf("usage: lrm clean [-n] [-f] [-d]")
+	}
+	_ = dry // default IS a dry run; -n just says so explicitly
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	res, err := gitcompat.Clean(r, force, withDirs)
+	if err != nil {
+		return err
+	}
+	if len(res.Candidates) == 0 {
+		fmt.Println("(nothing untracked — workdir only holds versioned files)")
+		return nil
+	}
+	for _, c := range res.Candidates {
+		if res.Removed {
+			fmt.Printf("removed %s\n", c)
+		} else {
+			fmt.Printf("would remove %s\n", c)
+		}
+	}
+	if !force {
+		fmt.Println("(dry run — pass -f to actually delete)")
+	}
+	return nil
+}
+
+func cmdDescribe(args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("usage: lrm describe [ref]")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	ref := "HEAD"
+	if len(args) == 1 {
+		ref = args[0]
+	}
+	h, err := resolveCommitRef(r, ref)
+	if err != nil {
+		return err
+	}
+	name, err := gitcompat.Describe(r, h)
+	if err != nil {
+		return err
+	}
+	fmt.Println(name)
+	return nil
+}

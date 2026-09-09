@@ -24,6 +24,14 @@ into a peer-to-peer equivalent. This is the complete translation table.
 | `git clone URL dir` | `lrm clone <PORTKEY> <dir>` (= `join --init`) | verified dial + full history + checkout |
 | `git push --force` | *(impossible by design)* | history is a content-addressed DAG; concurrent tips become `HEAD-peer-*` branches, never overwritten |
 | merge conflicts (`<<<<<<<`) | `HEAD-peer-<short8>` branches | no conflict markers injected into your files — the peer's tip is preserved on a named branch, your workdir untouched |
+| `git blame F` | `lrm blame F [REF]` | per-line authorship; follows the first-parent chain through merges |
+| `git cherry-pick H` | `lrm cherry-pick REF` | file-level 3-way replay; conflicts abort cleanly, workdir untouched |
+| `git grep PAT` | `lrm grep [-i] [-l] PAT [REF]` | literal substring (no regex dialect); workdir or any ref; binary/large skipped |
+| `git config user.name` | `lrm config user [NAME]` | view/set author name; `port` likewise; peer id is immutable |
+| `git clean -fd` | `lrm clean [-f] [-d]` | dry run by default — nothing deletes without `-f` |
+| `git describe` | `lrm describe [REF]` | nearest reachable tag (`v1-3-g<short>`); BFS over all parents |
+| `git commit --amend` | `lrm commit --amend [-m MSG]` | folds workdir into tip (same parents; old tip unreferenced) |
+| `git checkout -b N` | `lrm checkout -b N` | create + switch in one step |
 | `git cat-file -p H` | `lrm cat-file H` | prints blobs / manifests / trees / commits |
 | `git fsck` | `lrm fsck` | verifies CAS reachability from all refs (compat layer) |
 | `git gc` | `lrm gc` | drops objects unreachable from refs + replog window (compat layer) |

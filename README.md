@@ -61,6 +61,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Automated conflict branching (`HEAD-peer-<short>`, never overwrites) | ✅ |
 | | Replication log (append-only JSONL audit trail) | ✅ |
 | | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
+| **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
 | **4 — Scripting** | LRS runtime language (`.lr`): sharing + site/network tests, `.txt` reports | ✅ |
 | | LRQ query language (`.lrq`): 8 read-only repo queries, `.txt` reports | ✅ |
 | | `lrm run` / `lrm query` + bare `lrm file.lr` dispatch, tag delete | ✅ |
@@ -97,6 +98,14 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm fsck` | verify CAS reachability from all refs |
 | `lrm gc [--dry-run]` | prune unreachable objects |
 | `lrm remote -v` | list LIVE peers (there is nothing to configure) |
+| `lrm blame <FILE> [REF]` | per-line authorship (first-parent walk) |
+| `lrm cherry-pick <REF>` | replay a commit onto this branch (file-level 3-way) |
+| `lrm grep [-i] [-l] <PAT> [REF]` | literal-substring search in workdir or history |
+| `lrm config [--list] [user\|port [V]]` | view / change identity settings |
+| `lrm clean [-n] [-f] [-d]` | list / delete untracked files (dry run by default) |
+| `lrm describe [REF]` | nearest tag (`v1-3-g<short>`) |
+| `lrm commit --amend [-m MSG]` | fold workdir state into the tip commit |
+| `lrm checkout -b NAME` | create a branch and switch to it |
 | `lrm tag [NAME [HASH]]` | list / create lightweight tags |
 | `lrm tag -d NAME` | delete a tag |
 | `lrm run <S.lr> [--report P] [--timeout D] [-- args]` | run an LRS script, export `.txt` report |

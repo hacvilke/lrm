@@ -15,6 +15,7 @@ import (
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/daemon"
+	"github.com/lrm-project/lrm/internal/gitcompat"
 	"github.com/lrm-project/lrm/internal/mdns"
 	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/mux"
@@ -89,6 +90,18 @@ func Run(argv []string) int {
 		err = cmdRemote(args)
 	case "tag":
 		err = cmdTag(args)
+	case "blame":
+		err = cmdBlame(args)
+	case "cherry-pick", "pick":
+		err = cmdPick(args)
+	case "grep":
+		err = cmdGrep(args)
+	case "config":
+		err = cmdConfig(args)
+	case "clean":
+		err = cmdClean(args)
+	case "describe":
+		err = cmdDescribe(args)
 	case "run":
 		err = cmdRun(args)
 	case "query", "q":
@@ -155,6 +168,14 @@ Git-reverse compat (git spellings, P2P standing):
   remote -v                                 list LIVE peers (nothing to configure)
   tag [NAME [HASH]]                         list / create lightweight tags
   tag -d NAME                               delete a tag
+  blame <FILE> [REF]                        line-by-line authorship (first-parent walk)
+  cherry-pick <REF>                         replay a commit onto this branch (file-level 3-way)
+  grep [-i] [-l] <PATTERN> [REF]            literal-substring search (workdir or history)
+  config [--list] [user|port [VALUE]]       view / change identity settings
+  clean [-n] [-f] [-d]                      list / delete untracked files (dry run by default)
+  describe [REF]                            nearest tag name (<tag>[-N-g<short>])
+  commit --amend [-m MSG]                   fold workdir state into the tip commit
+  checkout -b NAME                          create a branch and switch to it
 
 Scripting (LRS runtime + LRQ queries):
   run <SCRIPT.lr> [--report PATH] [--timeout 30s] [-- args...]
@@ -303,7 +324,9 @@ func cmdStatus(args []string) error {
 
 func cmdCommit(args []string) error {
 	msg, args := flagVal(args, "-m", "--message")
-	if msg == "" {
+	amend, args := hasFlag(args, "--amend")
+	_ = args
+	if msg == "" && !amend {
 		return fmt.Errorf("commit message required: lrm commit -m \"msg\"")
 	}
 	r, err := openRepo()
@@ -311,6 +334,14 @@ func cmdCommit(args []string) error {
 		return err
 	}
 	defer r.Close()
+	if amend {
+		h, err := gitcompat.Amend(r, msg)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("amended tip → %s\n", cas.Hex(h)[:12])
+		return nil
+	}
 	res, err := r.Index.Scan(r.Root, r.CAS)
 	if err != nil {
 		return err
@@ -602,13 +633,43 @@ func cmdBranch(args []string) error {
 
 func cmdCheckout(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: lrm checkout <branch>")
+		return fmt.Errorf("usage: lrm checkout [-b] <branch>")
 	}
 	r, err := openRepo()
 	if err != nil {
 		return err
 	}
 	defer r.Close()
+	if args[0] == "-b" {
+		if len(args) != 2 || args[1] == "" {
+			return fmt.Errorf("usage: lrm checkout -b <new-branch>")
+		}
+		name := args[1]
+		if tipHex, _ := r.GetRef(name); tipHex != "" {
+			return fmt.Errorf("branch %q already exists", name)
+		}
+		if branches, _ := r.ListBranches(); branches != nil {
+			for _, b := range branches {
+				if b == name {
+					return fmt.Errorf("branch %q already exists", name)
+				}
+			}
+		}
+		curTip, _, err := r.HeadCommit()
+		if err != nil {
+			return err
+		}
+		if curTip != cas.Nil {
+			if err := r.SetRef(name, cas.Hex(curTip)); err != nil {
+				return err
+			}
+		}
+		if err := r.SetHeadBranch(name); err != nil {
+			return err
+		}
+		fmt.Printf("created and switched to branch %s\n", name)
+		return nil
+	}
 	name := args[0]
 	tipHex, _ := r.GetRef(name)
 	// Allow checkout of unborn branch only if it exists or tip empty.
@@ -649,16 +710,9 @@ func cmdMerge(args []string) error {
 	}
 	defer r.Close()
 	target := args[0]
-	tipHex, _ := r.GetRef(target)
-	var h cas.Hash
-	if tipHex != "" {
-		h, _ = cas.ParseHex(tipHex)
-	} else {
-		hh, err := r.CAS.Parse(target)
-		if err != nil {
-			return fmt.Errorf("unknown branch or commit %q", target)
-		}
-		h = hh
+	h, err := resolveCommitRef(r, target)
+	if err != nil {
+		return err
 	}
 	res, err := sync.MergeLocal(r, h, target)
 	if err != nil {

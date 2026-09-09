@@ -219,3 +219,30 @@ func prefixLines(lines []string, p string) []string {
 	}
 	return out
 }
+
+// LineOp is one line-level edit step between an old and a new text.
+type LineOp struct {
+	Kind   byte // ' ' equal, '-' deleted from old, '+' added in new
+	OldIdx int  // line index in old (valid unless Kind == '+')
+	NewIdx int  // line index in new (valid unless Kind == '-')
+}
+
+// DiffLineOps returns the line edit script turning a into b.
+// Large inputs use the same bounded greedy fallback as DiffLines.
+func DiffLineOps(a, b []string) []LineOp {
+	ops := lcsOps(a, b)
+	out := make([]LineOp, 0, len(ops))
+	for _, o := range ops {
+		var k byte
+		switch o.kind {
+		case 0:
+			k = ' '
+		case 1:
+			k = '-'
+		default:
+			k = '+'
+		}
+		out = append(out, LineOp{Kind: k, OldIdx: o.aIdx, NewIdx: o.bIdx})
+	}
+	return out
+}
