@@ -138,7 +138,13 @@ func (e *Engine) serveResponder(ctl *mux.Stream, sess *mux.Session, hello Msg, r
 	if remoteTip == cas.Nil {
 		// Remote is empty: push our history instead.
 		if localTip != cas.Nil {
-			return e.pushToRemote(ctl, sess, localTip, res)
+			if err := e.pushToRemote(ctl, sess, localTip, res); err != nil {
+				return err
+			}
+			if res.Pushed > 0 && res.Message == "" {
+				res.Message = fmt.Sprintf("pushed %d commit(s) to peer", res.Pushed)
+			}
+			return nil
 		}
 		return writeMsg(ctl, Msg{Type: "done"})
 	}
@@ -155,8 +161,12 @@ func (e *Engine) serveResponder(ctl *mux.Stream, sess *mux.Session, hello Msg, r
 	}
 	// Now push anything they lack (bidirectional).
 	if localTip != cas.Nil {
+		pushedBefore := res.Pushed
 		if err := e.pushToRemote(ctl, sess, localTip, res); err != nil {
 			return err
+		}
+		if n := res.Pushed - pushedBefore; n > 0 && (res.Message == "" || res.Message == "already up to date") {
+			res.Message = fmt.Sprintf("pushed %d commit(s) to peer", n)
 		}
 	}
 	return writeMsg(ctl, Msg{Type: "done"})
@@ -323,13 +333,7 @@ func (e *Engine) fetchObjects(ctl *mux.Stream, sess *mux.Session, objs []cas.Has
 	for _, h := range objs {
 		hexes = append(hexes, cas.Hex(h))
 	}
-	ds, err := sess.OpenStream()
-	if err != nil {
-		return err
-	}
-	defer ds.Close()
-	// Send request with our data-stream id so responder writes there.
-	if err := writeMsg(ctl, Msg{Type: "want-objects", Objects: hexes, Extra: map[string]string{"stream": fmt.Sprintf("%d", ds.ID())}}); err != nil {
+	if err := writeMsg(ctl, Msg{Type: "want-objects", Objects: hexes}); err != nil {
 		return err
 	}
 	// Responder opens its own stream to us; accept it.
@@ -556,13 +560,21 @@ func (e *Engine) serveInitiatorRequests(ctl *mux.Stream, sess *mux.Session, hell
 				}
 			}
 		case "push-tip":
-			// Dialer announces a tip we should integrate.
-			if len(m.Heads) > 0 {
-				if h, err := cas.ParseHex(m.Heads[0]); err == nil && e.Repo.DAG.Has(h) {
-					localTip, localBranch, _ := e.Repo.HeadCommit()
-					_ = e.integrate(h, m.Peer, localTip, localBranch, res)
-				}
+			// Dialer announces a tip we should integrate. First ensure we
+			// hold every object it needs (fetch from dialer), then integrate.
+			// Always reply push-ok exactly once (dialer blocks on it).
+			pushErr := ""
+			if len(m.Heads) == 0 {
+				pushErr = "no tip announced"
+			} else if h, err := cas.ParseHex(m.Heads[0]); err != nil || !e.Repo.DAG.Has(h) {
+				pushErr = "tip unknown (push-have incomplete?)"
+			} else if err := e.ensureTipObjects(ctl, sess, h); err != nil {
+				pushErr = err.Error()
+			} else {
+				localTip, localBranch, _ := e.Repo.HeadCommit()
+				_ = e.integrate(h, m.Peer, localTip, localBranch, res)
 			}
+			_ = writeMsg(ctl, Msg{Type: "push-ok", Peer: e.Repo.Identity.HexID(), Error: pushErr})
 		}
 	}
 }
@@ -589,14 +601,83 @@ func (e *Engine) pushToRemote(ctl *mux.Stream, sess *mux.Session, localTip cas.H
 		if err := writeMsg(ctl, Msg{Type: "push-have", Peer: e.Repo.Identity.HexID(), Commits: raws}); err != nil {
 			return err
 		}
+		res.Pushed += len(raws)
 	}
-	// Push missing objects: we don't know what remote lacks; send all
-	// objects for our tip closure that are reasonably small? For sprint
-	// correctness with bounded work: send objects for the tip tree only
-	// when responder requests. Instead, announce tip and let responder
-	// fetch via want-objects on a NEW session (it will dial back or the
-	// next sync completes it). For now, announce tip for integrate attempt.
-	return writeMsg(ctl, Msg{Type: "push-tip", Peer: e.Repo.Identity.HexID(), Heads: []string{cas.Hex(localTip)}})
+	// Announce the tip, then serve object requests until the responder
+	// confirms it has everything (push-ok). This closes the push leg:
+	// the responder fetches missing trees/blobs/chunks NOW, so its repo
+	// is never left with a tip whose objects are missing.
+	if err := writeMsg(ctl, Msg{Type: "push-tip", Peer: e.Repo.Identity.HexID(), Heads: []string{cas.Hex(localTip)}}); err != nil {
+		return err
+	}
+	for {
+		m, err := readMsg(ctl)
+		if err != nil {
+			return nil // responder closed; nothing more to serve
+		}
+		switch m.Type {
+		case "want-objects":
+			if err := e.serveObjects(sess, m.Objects); err != nil {
+				return err
+			}
+		case "push-ok":
+			if m.Error != "" {
+				return fmt.Errorf("peer push-tip: %s", m.Error)
+			}
+			return nil
+		case "done":
+			return nil
+		}
+	}
+}
+
+// collectKnownChain returns commits reachable from tip through locally-known
+// objects (bounded BFS; stops at unknown parents).
+func (e *Engine) collectKnownChain(tip cas.Hash) []cas.Hash {
+	var out []cas.Hash
+	seen := map[cas.Hash]bool{}
+	queue := []cas.Hash{tip}
+	for len(queue) > 0 && len(out) < 2000 {
+		h := queue[0]
+		queue = queue[1:]
+		if seen[h] || !e.Repo.DAG.Has(h) {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+		c, err := e.Repo.DAG.Get(h)
+		if err != nil {
+			continue
+		}
+		for _, p := range c.Parents {
+			if ph, err := cas.ParseHex(p); err == nil && !seen[ph] {
+				queue = append(queue, ph)
+			}
+		}
+	}
+	return out
+}
+
+// ensureTipObjects fetches (from the dialer over ctl) every object needed to
+// materialize tip: multi-round until nothing is missing.
+func (e *Engine) ensureTipObjects(ctl *mux.Stream, sess *mux.Session, tip cas.Hash) error {
+	chain := e.collectKnownChain(tip)
+	for round := 0; round < 12; round++ {
+		objs, err := e.missingObjects(chain)
+		if err != nil {
+			return err
+		}
+		if len(objs) == 0 {
+			return nil
+		}
+		if err := e.fetchObjects(ctl, sess, objs); err != nil {
+			return err
+		}
+	}
+	if objs, _ := e.missingObjects(chain); len(objs) > 0 {
+		return fmt.Errorf("%d object(s) still missing for pushed tip", len(objs))
+	}
+	return nil
 }
 
 // serveObjects streams requested objects on a fresh mux stream.

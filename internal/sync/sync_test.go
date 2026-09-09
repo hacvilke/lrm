@@ -202,3 +202,70 @@ func TestSyncCleanMerge(t *testing.T) {
 		t.Fatal("bob-only.txt missing after merge")
 	}
 }
+
+// TestPushLegCompleteness is a regression test: when the DIALER holds commits
+// the responder lacks, the push leg must transfer commits AND all objects, so
+// the responder ends fast-forwarded (or merged) with zero missing objects.
+func TestPushLegCompleteness(t *testing.T) {
+	r := mkRepo(t, "responder")
+	commitFile(t, r, "base.txt", "base\n", "base")
+
+	d := mkRepo(t, "dialer")
+	// Seed dialer with responder's history first.
+	pa, pb := net.Pipe()
+	sR := mux.NewSession(pa, false)
+	sD := mux.NewSession(pb, true)
+	var wg stdsync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = New(r).SyncWithSession(sR, false, "") }()
+	go func() { defer wg.Done(); _, _ = New(d).SyncWithSession(sD, true, "") }()
+	wg.Wait()
+	sR.Close()
+	sD.Close()
+
+	// Dialer adds UNIQUE content the responder has never seen.
+	commitFile(t, d, "dialer-only.txt", "secret sauce\n", "dialer work")
+
+	// Dialer dials responder: fetch leg finds nothing new; push leg must
+	// deliver the commit + tree + blob; responder fast-forwards.
+	pa2, pb2 := net.Pipe()
+	sR2 := mux.NewSession(pa2, false)
+	sD2 := mux.NewSession(pb2, true)
+	defer sR2.Close()
+	defer sD2.Close()
+	wg.Add(2)
+	var resR, resD *SyncResult
+	var errR, errD error
+	go func() { defer wg.Done(); resR, errR = New(r).SyncWithSession(sR2, false, "") }()
+	go func() { defer wg.Done(); resD, errD = New(d).SyncWithSession(sD2, true, "") }()
+	wg.Wait()
+	if errD != nil {
+		t.Fatalf("dialer: %v", errD)
+	}
+	if errR != nil {
+		t.Fatalf("responder: %v", errR)
+	}
+	_ = resR
+	_ = resD
+	tipD, _, _ := d.HeadCommit()
+	tipR, _, _ := r.HeadCommit()
+	if tipD != tipR {
+		t.Fatalf("responder tip %s != dialer tip %s", cas.Short(tipR), cas.Short(tipD))
+	}
+	raw, err := os.ReadFile(filepath.Join(r.Root, "dialer-only.txt"))
+	if err != nil || string(raw) != "secret sauce\n" {
+		t.Fatalf("pushed file missing/corrupt: %q %v", raw, err)
+	}
+	// No missing objects: every reachable commit's tree must exist.
+	hashes, commits, err := r.DAG.WalkTipOrder(tipR, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = hashes
+	for _, c := range commits {
+		th, _ := cas.ParseHex(c.Tree)
+		if !r.CAS.Exists(th) {
+			t.Fatalf("missing tree %s for pushed history", c.Tree[:12])
+		}
+	}
+}

@@ -82,6 +82,16 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm join <PORTKEY> [--init]` | verified dial + full history sync |
 | `lrm sync [--peer H:P]` | sync with LAN peers (or one peer) |
 | `lrm daemon [--port P]` | real-time engine: watch + announce + sync |
+| `lrm add [paths...]` | confirm auto-tracked paths (the `add` ritual, reversed away) |
+| `lrm push [--peer H:P]` | sync history out to peers (force-push is impossible by design) |
+| `lrm pull` / `lrm fetch` | sync in from peers (bidirectional in one session) |
+| `lrm clone <PORTKEY> [dir]` | verified dial + full history + checkout |
+| `lrm stash [push\|pop\|list]` | shelf / restore workdir deltas |
+| `lrm reset [--soft\|--mixed\|--hard] <H>` | move branch ref (± index ± workdir) |
+| `lrm fsck` | verify CAS reachability from all refs |
+| `lrm gc [--dry-run]` | prune unreachable objects |
+| `lrm remote -v` | list LIVE peers (there is nothing to configure) |
+| `lrm tag [NAME [HASH]]` | list / create lightweight tags |
 
 Git users: see [`docs/GIT_REVERSE_MAP.md`](docs/GIT_REVERSE_MAP.md) — every git
 workflow reversed into its LRM equivalent (`push`→`share`/`sync`,
@@ -127,7 +137,8 @@ internal/
   mux/              streaming multiplexer (many streams, one conn)
   sync/             have/want sync, merge, conflict branches, checkout
   daemon/           background engine (watch + announce + map + sync)
-  cli/              command implementations
+  gitcompat/        git-reverse layer: stash, reset, fsck, gc, tag, add
+  cli/              command implementations (incl. push/pull/clone/remote)
 docs/               architecture, protocol, WAN spec, git map
 ```
 

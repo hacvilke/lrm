@@ -67,6 +67,26 @@ func Run(argv []string) int {
 		err = cmdCatFile(args)
 	case "replog":
 		err = cmdReplog(args)
+	case "add":
+		err = cmdAdd(args)
+	case "push":
+		err = cmdPush(args)
+	case "pull", "fetch":
+		err = cmdPull(args)
+	case "clone":
+		err = cmdClone(args)
+	case "stash":
+		err = cmdStash(args)
+	case "reset":
+		err = cmdReset(args)
+	case "fsck":
+		err = cmdFsck(args)
+	case "gc":
+		err = cmdGC(args)
+	case "remote":
+		err = cmdRemote(args)
+	case "tag":
+		err = cmdTag(args)
 	case "version", "-V", "--version":
 		fmt.Println("lrm version 0.1.0 (sprint build)")
 	case "help", "-h", "--help":
@@ -109,6 +129,18 @@ P2P mesh:
   sync [--peer HOST:PORT]                   sync with LAN peers (or one peer)
   daemon [--port PORT]                      run background engine (watch+sync)
 
+Git-reverse compat (git spellings, P2P standing):
+  add [paths...]                            confirm auto-tracked paths (no-op ritual)
+  push [--peer HOST:PORT]                   sync out to peers (no force-push exists)
+  pull | fetch [--peer HOST:PORT]            sync in from peers (bidir in one session)
+  clone <PORTKEY> [dir]                     verified dial + full history + checkout
+  stash [push|pop|list]                     shelf / restore workdir deltas
+  reset [--soft|--mixed|--hard] <commit>    move branch ref (± index ± workdir)
+  fsck                                      verify CAS reachability from all refs
+  gc [--dry-run]                            prune unreachable objects
+  remote -v                                 list LIVE peers (nothing to configure)
+  tag [NAME [HASH]]                         list / create lightweight tags
+
 Examples:
   lrm init --user alice
   lrm commit -m "first commit"
@@ -131,10 +163,11 @@ func flagVal(args []string, names ...string) (string, []string) {
 	for i, a := range args {
 		for _, n := range names {
 			if a == n && i+1 < len(args) {
-				return args[i+1], append(args[:i], args[i+2:]...)
+				val := args[i+1] // capture BEFORE splicing (append may clobber backing array)
+				return val, spliceOut(args, i, i+2)
 			}
 			if strings.HasPrefix(a, n+"=") {
-				return strings.TrimPrefix(a, n+"="), append(args[:i], args[i+1:]...)
+				return strings.TrimPrefix(a, n+"="), spliceOut(args, i, i+1)
 			}
 		}
 	}
@@ -145,11 +178,20 @@ func hasFlag(args []string, names ...string) (bool, []string) {
 	for i, a := range args {
 		for _, n := range names {
 			if a == n {
-				return true, append(args[:i], args[i+1:]...)
+				return true, spliceOut(args, i, i+1)
 			}
 		}
 	}
 	return false, args
+}
+
+// spliceOut returns args minus [lo,hi), allocating a fresh slice so the
+// caller's backing array is never mutated.
+func spliceOut(args []string, lo, hi int) []string {
+	out := make([]string, 0, len(args)-(hi-lo))
+	out = append(out, args[:lo]...)
+	out = append(out, args[hi:]...)
+	return out
 }
 
 // --- local commands ---
