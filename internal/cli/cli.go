@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
+	"github.com/lrm-project/lrm/internal/patch"
 	"github.com/lrm-project/lrm/internal/portkey"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
@@ -112,9 +114,9 @@ Local engine:
   init [path] [--user NAME] [--port PORT]   create a new repo
   status                                    show branch, tip, pending changes
   commit -m MSG                             version current workspace state
-  log [--limit N]                           show history
-  show [HASH]                               show a commit
-  diff [HASH1 [HASH2]]                      diff tips or working dir
+  log [--limit N] [--graph] [--oneline]     show history (graph = ASCII DAG)
+  show [HASH]                               show a commit + its patches
+  diff [HASH1 [HASH2]] [--stat]             unified patches (or file list)
   branch [--list] [NAME]                    list / create branches
   checkout <BRANCH>                         switch branch (updates workdir)
   merge <BRANCH|HASH>                       merge into current branch
@@ -284,6 +286,8 @@ func cmdCommit(args []string) error {
 }
 
 func cmdLog(args []string) error {
+	graph, args := hasFlag(args, "--graph")
+	oneline, args := hasFlag(args, "--oneline")
 	limitStr, _ := flagVal(args, "--limit", "-n")
 	limit := 20
 	if limitStr != "" {
@@ -302,6 +306,27 @@ func cmdLog(args []string) error {
 	}
 	if tip == cas.Nil {
 		fmt.Println("(no commits yet)")
+		return nil
+	}
+	if graph || oneline {
+		order, lookup, err := GraphOrder(r, tip, limit)
+		if err != nil {
+			return err
+		}
+		if oneline && !graph {
+			for _, h := range order {
+				msg := "(missing)"
+				if c := lookup[h]; c != nil {
+					msg = firstLine(c.Message)
+				}
+				fmt.Printf("%s %s\n", cas.Short(h), msg)
+			}
+			return nil
+		}
+		fmt.Printf("history of %s:\n", br)
+		for _, row := range RenderGraph(order, lookup) {
+			fmt.Println(row)
+		}
 		return nil
 	}
 	hashes, commits, err := r.DAG.WalkTipOrder(tip, limit)
@@ -362,10 +387,43 @@ func cmdShow(args []string) error {
 	for _, p := range paths {
 		fmt.Printf("  %s  %s\n", flat[p][:8], p)
 	}
+	// Patches vs first parent (git-show style).
+	var oldRoot cas.Hash // Nil = initial commit
+	switch len(c.Parents) {
+	case 0:
+		fmt.Println("\n(initial commit)")
+	case 1:
+		ph, err := cas.ParseHex(c.Parents[0])
+		if err != nil {
+			return nil
+		}
+		pc, err := r.DAG.Get(ph)
+		if err != nil {
+			fmt.Printf("\n(parent %s not fetched yet — patches unavailable)\n", shortHex(c.Parents[0]))
+			return nil
+		}
+		oldRoot, _ = cas.ParseHex(pc.Tree)
+	default:
+		fmt.Printf("\n(merge of %d parents — use `lrm diff <parent> %s` for patches)\n", len(c.Parents), cas.Short(h))
+		return nil
+	}
+	fps, err := patch.Build(r, oldRoot, th, 0)
+	if err != nil {
+		return err
+	}
+	for _, fp := range fps {
+		switch fp.Kind {
+		case "binary", "large":
+			fmt.Printf("\n--- a/%s\n+++ b/%s\n(%s: %s)\n", fp.Path, fp.Path, fp.Kind, fp.Note)
+		default:
+			fmt.Printf("\n%s", fp.Patch.Unified())
+		}
+	}
 	return nil
 }
 
 func cmdDiff(args []string) error {
+	statOnly, args := hasFlag(args, "--stat")
 	r, err := openRepo()
 	if err != nil {
 		return err
@@ -420,16 +478,37 @@ func cmdDiff(args []string) error {
 		oldRoot, _ = cas.ParseHex(c1.Tree)
 		newRoot, _ = cas.ParseHex(c2.Tree)
 	}
-	changes, err := merkle.Diff(r.CAS, oldRoot, newRoot)
+	if statOnly {
+		changes, err := merkle.Diff(r.CAS, oldRoot, newRoot)
+		if err != nil {
+			return err
+		}
+		if len(changes) == 0 {
+			fmt.Println("no differences")
+			return nil
+		}
+		for _, ch := range changes {
+			fmt.Printf("%-8s %s\n", ch.Kind, ch.Path)
+		}
+		return nil
+	}
+	fps, err := patch.Build(r, oldRoot, newRoot, 0)
 	if err != nil {
 		return err
 	}
-	if len(changes) == 0 {
+	if len(fps) == 0 {
 		fmt.Println("no differences")
 		return nil
 	}
-	for _, ch := range changes {
-		fmt.Printf("%-8s %s\n", ch.Kind, ch.Path)
+	for _, fp := range fps {
+		switch fp.Kind {
+		case "binary", "large":
+			fmt.Printf("diff --lrm a/%s b/%s\n", fp.Path, fp.Path)
+			fmt.Printf("(%s: %s)\n", fp.Kind, fp.Note)
+		default:
+			fmt.Printf("diff --lrm a/%s b/%s\n", fp.Path, fp.Path)
+			fmt.Printf("%s", fp.Patch.Unified())
+		}
 	}
 	return nil
 }
@@ -664,6 +743,8 @@ func cmdShare(args []string) error {
 		}
 	}
 	fmt.Printf("LRM share — opening WAN port %d (user %s, peer %s)\n", port, r.Config.User, r.Identity.ShortID())
+	// Probe early (cheap): a Port Key is useless if nobody accepts the dial.
+	served := isListening(port)
 
 	mappedPort := uint16(port)
 	var publicIP []byte
@@ -737,6 +818,9 @@ func cmdShare(args []string) error {
 			fmt.Println()
 			fmt.Printf("Automatic port mapping failed. Please manually forward port %d or use a fallback relay.\n", port)
 			fmt.Printf("Your LAN addresses: %s (share these + port for same-WiFi join)\n", strings.Join(mdns.LocalAddrs(), ", "))
+			if !served {
+				printServeWarning(port)
+			}
 			return fmt.Errorf("could not determine public IP; no Port Key generated")
 		}
 		publicIP = ip
@@ -756,7 +840,33 @@ func cmdShare(args []string) error {
 	if !upnpOK && !pmpOK {
 		fmt.Printf("WARNING: no router mapping — ensure port %d is forwarded or the peer cannot dial you.\n", port)
 	}
+	// Safety: a Port Key is useless if nobody accepts the dial. The share
+	// port must be served (normally by `lrm daemon` in this repo).
+	if served {
+		fmt.Printf("Local listener detected on port %d ✓ (peers can dial now)\n", port)
+	} else {
+		printServeWarning(port)
+	}
 	return nil
+}
+
+// printServeWarning tells the user their share port has no listener.
+func printServeWarning(port int) {
+	fmt.Println()
+	fmt.Printf("⚠  NOBODY IS LISTENING on port %d on THIS machine.\n", port)
+	fmt.Println("   Your teammate's dial will FAIL until you serve this repo:")
+	fmt.Printf("       lrm daemon --port %d   (in another terminal, same repo)\n", port)
+	fmt.Println("   The daemon also renews the router lease automatically.")
+}
+
+// isListening probes whether something accepts TCP on localhost:port.
+func isListening(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func cmdJoin(args []string) error {

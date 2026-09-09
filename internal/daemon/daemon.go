@@ -49,9 +49,14 @@ type Daemon struct {
 	cfg    Config
 	ln     *transport.Listener
 	adv    *mdns.Advertiser
-	peers  sync.Map // peerHex -> *peerConn
+	peers  sync.Map // peerHex -> *peerConn (live sessions)
+	known  sync.Map // peerHex -> mdns.Peer (discovery cache)
+	dialMu sync.Map // peerHex -> struct{} (dial in progress guard)
 	pins   map[string]string
 	pinsMu sync.Mutex
+	// dialNow triggers an immediate dial round (zero-lag propagation).
+	// Capacity 1: bursts coalesce into a single round.
+	dialNow chan struct{}
 
 	upnpGW         *upnp.Gateway
 	upnpMapped     bool
@@ -85,9 +90,17 @@ func New(repo *store.Repo, cfg Config) *Daemon {
 	if cfg.PeerRefresh <= 0 {
 		cfg.PeerRefresh = 10 * time.Second
 	}
-	d := &Daemon{repo: repo, cfg: cfg, pins: map[string]string{}}
+	d := &Daemon{repo: repo, cfg: cfg, pins: map[string]string{}, dialNow: make(chan struct{}, 1)}
 	d.loadPins()
 	return d
+}
+
+// requestDial triggers an immediate dial round (non-blocking, coalescing).
+func (d *Daemon) requestDial() {
+	select {
+	case d.dialNow <- struct{}{}:
+	default:
+	}
 }
 
 // Repo exposes the repo.
@@ -122,8 +135,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.adv = mdns.StartAdvertiser(d.repo.Identity.HexID(), d.repo.Identity.HexPub(), d.repo.Config.User, d.cfg.Port, 2*time.Second)
 
 	var wg sync.WaitGroup
-	wg.Add(4)
+	wg.Add(5)
 	go func() { defer wg.Done(); d.acceptLoop(ctx) }()
+	go func() { defer wg.Done(); d.browseLoop(ctx) }()
 	go func() { defer wg.Done(); d.peerLoop(ctx) }()
 	go func() { defer wg.Done(); d.watchLoop(ctx) }()
 	go func() { defer wg.Done(); d.refreshMappingsLoop(ctx) }()
@@ -182,14 +196,24 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 		return
 	}
 	sess := mux.NewSession(sc, false)
+	if _, exists := d.peers.Load(peerHex); exists {
+		_ = sess.Close() // duplicate session; keep the existing one
+		return
+	}
 	d.peers.Store(peerHex, &peerConn{peer: mdns.Peer{PeerHex: peerHex, SeenAt: time.Now(), Source: "inbound"}, secure: sc, sess: sess})
 	defer d.peers.Delete(peerHex)
 	eng := lrmsync.New(d.repo)
 	res, err := eng.SyncWithSession(sess, false, "")
-	if err == nil && d.onSync != nil {
+	_ = sess.Close()
+	if err != nil {
+		return
+	}
+	if d.onSync != nil {
 		d.onSync(res)
 	}
-	_ = sess.Close()
+	if res.FastForwarded || res.MergedCommit != "" {
+		d.requestDial() // our tip advanced — propagate to OTHER peers now
+	}
 }
 
 // --- outbound LAN peers ---
@@ -197,34 +221,58 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 func (d *Daemon) peerLoop(ctx context.Context) {
 	t := time.NewTicker(d.cfg.PeerRefresh)
 	defer t.Stop()
-	d.discoverAndDial(ctx)
+	d.dialKnownPeers(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			d.discoverAndDial(ctx)
+			d.dialKnownPeers(ctx) // safety net: re-sync + find returnees
+		case <-d.dialNow:
+			d.dialKnownPeers(ctx) // zero-lag: fresh commit, dial NOW
 		}
 	}
 }
 
-func (d *Daemon) discoverAndDial(ctx context.Context) {
-	c, cancel := context.WithTimeout(ctx, 6*time.Second)
-	peers, _ := mdns.Browse(c, 5*time.Second)
-	cancel()
+// browseLoop continuously feeds the known-peer cache in the background, so
+// dial rounds never block on discovery.
+func (d *Daemon) browseLoop(ctx context.Context) {
 	self := d.repo.Identity.HexID()
-	for _, p := range peers {
+	mdns.BrowseContinuous(ctx, func(p mdns.Peer) {
 		if p.PeerHex == self || p.Port == 0 {
-			continue
+			return
+		}
+		d.known.Store(p.PeerHex, p)
+	})
+}
+
+// knownPeerTTL drops peers not seen recently (left the network).
+const knownPeerTTL = 30 * time.Second
+
+// dialKnownPeers dials cached, unconnected peers (instant — no discovery wait).
+func (d *Daemon) dialKnownPeers(ctx context.Context) {
+	d.known.Range(func(key, val any) bool {
+		p := val.(mdns.Peer)
+		if time.Since(p.SeenAt) > knownPeerTTL {
+			d.known.Delete(key)
+			return true
 		}
 		if _, ok := d.peers.Load(p.PeerHex); ok {
-			continue
+			return true // already connected
+		}
+		if _, dialing := d.dialMu.LoadOrStore(p.PeerHex, struct{}{}); dialing {
+			return true // dial already in flight
 		}
 		if !d.checkPin(p.PeerHex, mustHex(p.PubKey)) {
-			continue
+			d.dialMu.Delete(p.PeerHex)
+			return true
 		}
-		go d.dialPeer(ctx, p)
-	}
+		go func() {
+			defer d.dialMu.Delete(p.PeerHex)
+			d.dialPeer(ctx, p)
+		}()
+		return true
+	})
 }
 
 func (d *Daemon) dialPeer(ctx context.Context, p mdns.Peer) {
@@ -245,14 +293,24 @@ func (d *Daemon) dialPeer(ctx context.Context, p mdns.Peer) {
 		return
 	}
 	peerHex := fmt.Sprintf("%x", sc.Remote.PeerID)
+	if _, exists := d.peers.Load(peerHex); exists {
+		_ = sc.Close() // raced another session; keep the existing one
+		return
+	}
 	d.pin(peerHex, sc.Remote.PubKey)
 	sess := mux.NewSession(sc, true)
 	d.peers.Store(peerHex, &peerConn{peer: p, secure: sc, sess: sess})
 	defer func() { d.peers.Delete(peerHex); _ = sess.Close() }()
 	eng := lrmsync.New(d.repo)
 	res, err := eng.SyncWithSession(sess, true, "")
-	if err == nil && d.onSync != nil {
+	if err != nil {
+		return
+	}
+	if d.onSync != nil {
 		d.onSync(res)
+	}
+	if res.FastForwarded || res.MergedCommit != "" {
+		d.requestDial() // our tip advanced — propagate to OTHER peers now
 	}
 }
 
@@ -266,12 +324,12 @@ func (d *Daemon) watchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			d.scanAndCommit(ctx)
+			d.scanAndCommit()
 		}
 	}
 }
 
-func (d *Daemon) scanAndCommit(ctx context.Context) {
+func (d *Daemon) scanAndCommit() {
 	// Reload the index from disk: the CLI may have committed externally
 	// while the daemon runs (daemon's in-memory copy would be stale).
 	if fresh, err := staging.Load(filepath.Join(d.repo.LrmDir, "index.json")); err == nil {
@@ -309,22 +367,9 @@ func (d *Daemon) scanAndCommit(ctx context.Context) {
 		d.onChange(len(res.Changes))
 	}
 	_ = h
-	// Push to connected peers immediately (zero-lag streaming).
-	d.peers.Range(func(_, v any) bool {
-		pc := v.(*peerConn)
-		go func() {
-			eng := lrmsync.New(d.repo)
-			// Use a fresh control stream per push.
-			ctl, err := pc.sess.OpenStream()
-			if err != nil {
-				return
-			}
-			defer ctl.Close()
-			_ = ctx
-			_ = eng // full push happens on next periodic sync; this nudges
-		}()
-		return true
-	})
+	// Zero-lag propagation: fresh commit → dial cached peers immediately
+	// instead of waiting for the next periodic round.
+	d.requestDial()
 }
 
 // --- WAN mapping (UPnP → NAT-PMP → manual fallback) ---

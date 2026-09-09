@@ -60,7 +60,10 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Fast-forward, clean 3-way auto-merge | ✅ |
 | | Automated conflict branching (`HEAD-peer-<short>`, never overwrites) | ✅ |
 | | Replication log (append-only JSONL audit trail) | ✅ |
-| | Real-time daemon (watch → auto-commit → stream to peers) | ✅ |
+| | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
+| **2.5 — Readability** | Unified patches in `diff`/`show` (binary/large-file safe, 1 MiB cap) | ✅ |
+| | ASCII DAG `log --graph` + `log --oneline` | ✅ |
+| | `share` warns when no local listener serves the port | ✅ |
 
 ## Command reference
 
@@ -69,9 +72,9 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm init [--user N] [--port P] [path]` | create a repo (identity + CAS + refs + log) |
 | `lrm status` | branch, tip, root hash, pending changes |
 | `lrm commit -m MSG` | version the current Merkle root |
-| `lrm log [--limit N]` | history with vector clocks |
-| `lrm show [HASH]` | commit detail + file list |
-| `lrm diff [H1 [H2]]` | file-level changes (workdir vs tip, or tip vs tip) |
+| `lrm log [--limit N] [--graph] [--oneline]` | history with vector clocks (graph = ASCII DAG) |
+| `lrm show [HASH]` | commit detail + file list + unified patches |
+| `lrm diff [H1 [H2]] [--stat]` | unified patches, or file list with `--stat` |
 | `lrm branch [--list] [NAME]` | list / create branches |
 | `lrm checkout <BRANCH>` | switch branch (rewrites workdir, streaming) |
 | `lrm merge <BRANCH\|HASH>` | fast-forward or 3-way merge |
@@ -136,7 +139,8 @@ internal/
   transport/        authenticated-encryption channel (X25519/Ed25519/AES-GCM)
   mux/              streaming multiplexer (many streams, one conn)
   sync/             have/want sync, merge, conflict branches, checkout
-  daemon/           background engine (watch + announce + map + sync)
+  daemon/           background engine (watch + announce + map + instant sync)
+  patch/            unified-patch builder (bounded, binary/large aware)
   gitcompat/        git-reverse layer: stash, reset, fsck, gc, tag, add
   cli/              command implementations (incl. push/pull/clone/remote)
 docs/               architecture, protocol, WAN spec, git map

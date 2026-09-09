@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"net"
 	"reflect"
 	"testing"
 )
@@ -41,5 +42,20 @@ func TestHasFlag(t *testing.T) {
 	ok, rest := hasFlag([]string{"a", "--init", "b"}, "--init")
 	if !ok || !reflect.DeepEqual(rest, []string{"a", "b"}) {
 		t.Fatalf("ok=%v rest=%q", ok, rest)
+	}
+}
+
+func TestIsListening(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skip("no loopback listener available")
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	if !isListening(port) {
+		t.Fatalf("port %d should report listening", port)
+	}
+	_ = ln.Close()
+	if isListening(port) {
+		t.Fatalf("port %d should report closed after listener shutdown", port)
 	}
 }
