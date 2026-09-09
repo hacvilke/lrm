@@ -133,6 +133,18 @@ func RenderGraph(order []cas.Hash, lookup map[cas.Hash]*dag.Commit) []string {
 	return rows
 }
 
+// matchLogFilter reports whether a commit's message/author satisfy the
+// log filters. Needles must be pre-lowered; empty needles match all.
+func matchLogFilter(msg, author, grepNeedle, authorNeedle string) bool {
+	if grepNeedle != "" && !strings.Contains(strings.ToLower(msg), grepNeedle) {
+		return false
+	}
+	if authorNeedle != "" && !strings.Contains(strings.ToLower(author), authorNeedle) {
+		return false
+	}
+	return true
+}
+
 func firstLine(s string) string {
 	if i := strings.Index(s, "\n"); i >= 0 {
 		return s[:i]

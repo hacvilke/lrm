@@ -38,9 +38,15 @@ into a peer-to-peer equivalent. This is the complete translation table.
 | `git shortlog -sn` | `lrm shortlog [REF]` | commit counts per author |
 | `git mv A B` | `lrm mv A B` | workdir rename (tracking follows automatically); refuses escapes/overwrites |
 | `HEAD~N`, `REV^N` | same spellings | suffixes work in `show`/`diff`/`reset`/`describe`/`archive`/`blame`/`cherry-pick` — anywhere a ref resolves |
+| `git rebase B` (+ `--continue`/`--abort`) | `lrm rebase B` (+ `--continue`/`--abort`) | linear-only replay on a scratch branch: the branch moves once, at the end (abort = pure restore); original messages kept; merge commits refuse; no-op when upstream is already contained |
+| `git notes add/show/list` | `lrm notes add/show/list/remove REF` | local-only annotations (`refs/notes/<hex>`, never synced); `show` displays them |
+| `git log --grep/--author` | `lrm log --grep S --author A` | case-insensitive substring filters in all three modes (full/`--oneline`/`--graph`) |
+| `.gitignore` | `.lrmignore` | basename / `*` / anchored / `dir/` / `!` rules; honored by commit builds, `grep`, and `clean` (`-x` overrides); `.lrm`/`.git` always excluded |
+| `git stash show/drop/clear` | `lrm stash show [--name-only]` / `drop [N]` / `clear` | show = parent-vs-shelf unified diff; drop/pop compact shelf numbers; `pop` still restores newest by default |
+| `git gc` keeping reflog tips | `lrm gc` | ref-log old/new tips are reachability roots: amended/reset-away commits survive collection |
 | `git cat-file -p H` | `lrm cat-file H` | prints blobs / manifests / trees / commits |
 | `git fsck` | `lrm fsck` | verifies CAS reachability from all refs (compat layer) |
-| `git gc` | `lrm gc` | drops objects unreachable from refs + replog window (compat layer) |
+| `git gc` | `lrm gc` | drops objects unreachable from refs + ref-log tips (compat layer) |
 | Pull Requests / forks | `lrm share` + `lrm join` | the "PR" is a live P2P session: fetch their tip, `lrm merge HEAD-peer-*`, they sync back |
 | GitHub Actions | *(your machines)* | hooks run locally: `.lrm/hooks/` (roadmap) |
 

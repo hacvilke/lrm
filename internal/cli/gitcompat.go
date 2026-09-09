@@ -143,7 +143,8 @@ func cmdClone(args []string) error {
 func cmdStash(args []string) error {
 	sub := ""
 	rest := args
-	if len(args) > 0 && (args[0] == "push" || args[0] == "pop" || args[0] == "list") {
+	if len(args) > 0 && (args[0] == "push" || args[0] == "pop" || args[0] == "list" ||
+		args[0] == "show" || args[0] == "drop" || args[0] == "clear") {
 		sub, rest = args[0], args[1:]
 	}
 	r, err := openRepo()
@@ -182,6 +183,118 @@ func cmdStash(args []string) error {
 		for _, e := range entries {
 			fmt.Printf("%s  %s  %s\n", e.Name, e.Commit[:12], e.Message)
 		}
+	case "show":
+		nameOnly, rest := hasFlag(rest, "--name-only")
+		name := ""
+		if len(rest) > 0 {
+			name = rest[0]
+		}
+		res, err := gitcompat.StashShow(r, name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s  %s  %s\n", res.Entry.Name, res.Entry.Commit[:12], res.Entry.Message)
+		if len(res.Files) == 0 {
+			fmt.Println("(no file changes vs parent)")
+			return nil
+		}
+		for _, f := range res.Files {
+			fmt.Printf("%c %s\n", f.Kind, f.Path)
+		}
+		if nameOnly {
+			return nil
+		}
+		for _, f := range res.Files {
+			if f.Patch.Binary {
+				fmt.Printf("--- a/%s  (binary or too large — no text diff)\n", f.Path)
+				continue
+			}
+			fmt.Print(f.Patch.Unified())
+		}
+	case "drop":
+		name := ""
+		if len(rest) > 0 {
+			name = rest[0]
+		}
+		e, err := gitcompat.StashDrop(r, name)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dropped %s (%s) — remaining shelves renumbered.\n", e.Name, e.Message)
+	case "clear":
+		n, err := gitcompat.StashClear(r)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("cleared %d stash(es).\n", n)
+	}
+	return nil
+}
+
+func cmdNotes(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: lrm notes add|show|list|remove <REF> [-m TEXT]")
+	}
+	sub, rest := args[0], args[1:]
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	switch sub {
+	case "list":
+		notes, err := gitcompat.NoteList(r)
+		if err != nil {
+			return err
+		}
+		if len(notes) == 0 {
+			fmt.Println("(no notes)")
+			return nil
+		}
+		for _, n := range notes {
+			fmt.Printf("%s  %s\n", shortHex(n.Commit), firstLine(n.Text))
+		}
+	case "add":
+		force, rest := hasFlag(rest, "--force", "-f")
+		msg, rest := flagVal(rest, "-m", "--message")
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: lrm notes add <REF> -m TEXT [--force]")
+		}
+		h, err := resolveCommitRef(r, rest[0])
+		if err != nil {
+			return err
+		}
+		if err := gitcompat.NoteAdd(r, h, msg, force); err != nil {
+			return err
+		}
+		fmt.Printf("noted %s\n", shortHex(cas.Hex(h)))
+	case "show":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: lrm notes show <REF>")
+		}
+		h, err := resolveCommitRef(r, rest[0])
+		if err != nil {
+			return err
+		}
+		text, err := gitcompat.NoteShow(r, h)
+		if err != nil {
+			return err
+		}
+		fmt.Println(text)
+	case "remove":
+		if len(rest) == 0 {
+			return fmt.Errorf("usage: lrm notes remove <REF>")
+		}
+		h, err := resolveCommitRef(r, rest[0])
+		if err != nil {
+			return err
+		}
+		if err := gitcompat.NoteRemove(r, h); err != nil {
+			return err
+		}
+		fmt.Printf("removed note on %s\n", shortHex(cas.Hex(h)))
+	default:
+		return fmt.Errorf("usage: lrm notes add|show|list|remove <REF> [-m TEXT]")
 	}
 	return nil
 }
@@ -441,6 +554,53 @@ func cmdPick(args []string) error {
 	return nil
 }
 
+func cmdRebase(args []string) error {
+	cont, args := hasFlag(args, "--continue")
+	abort, args := hasFlag(args, "--abort")
+	if cont && abort {
+		return fmt.Errorf("pass only one of --continue or --abort")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	switch {
+	case cont:
+		if len(args) != 0 {
+			return fmt.Errorf("usage: lrm rebase --continue")
+		}
+		res, err := gitcompat.RebaseContinue(r)
+		if err != nil {
+			return err
+		}
+		fmt.Println(res.Message)
+	case abort:
+		if len(args) != 0 {
+			return fmt.Errorf("usage: lrm rebase --abort")
+		}
+		res, err := gitcompat.RebaseAbort(r)
+		if err != nil {
+			return err
+		}
+		fmt.Println(res.Message)
+	default:
+		if len(args) != 1 {
+			return fmt.Errorf("usage: lrm rebase <UPSTREAM> [--continue|--abort]")
+		}
+		h, err := resolveCommitRef(r, args[0])
+		if err != nil {
+			return err
+		}
+		res, err := gitcompat.RebaseStart(r, h)
+		if err != nil {
+			return err
+		}
+		fmt.Println(res.Message)
+	}
+	return nil
+}
+
 func cmdGrep(args []string) error {
 	ci, args := hasFlag(args, "-i", "--ignore-case")
 	filesOnly, args := hasFlag(args, "-l", "--files-with-matches")
@@ -551,8 +711,9 @@ func cmdClean(args []string) error {
 	dry, args := hasFlag(args, "-n", "--dry-run")
 	force, args := hasFlag(args, "-f", "--force")
 	withDirs, args := hasFlag(args, "-d", "--dir")
+	allIgnored, args := hasFlag(args, "-x", "--ignored")
 	if len(args) != 0 {
-		return fmt.Errorf("usage: lrm clean [-n] [-f] [-d]")
+		return fmt.Errorf("usage: lrm clean [-n] [-f] [-d] [-x]")
 	}
 	_ = dry // default IS a dry run; -n just says so explicitly
 	r, err := openRepo()
@@ -560,7 +721,7 @@ func cmdClean(args []string) error {
 		return err
 	}
 	defer r.Close()
-	res, err := gitcompat.Clean(r, force, withDirs)
+	res, err := gitcompat.Clean(r, force, withDirs, allIgnored)
 	if err != nil {
 		return err
 	}

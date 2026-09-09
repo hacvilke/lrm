@@ -211,7 +211,7 @@ func TestClean(t *testing.T) {
 	w(t, r.Root, "junk/a.txt", "x\n")
 	w(t, r.Root, "junk/deep/b.txt", "x\n")
 	// Dry run lists files.
-	res, err := Clean(r, false, false)
+	res, err := Clean(r, false, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestClean(t *testing.T) {
 		t.Fatalf("dry=%+v", res)
 	}
 	// Dirs collapse.
-	res, err = Clean(r, false, true)
+	res, err = Clean(r, false, true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestClean(t *testing.T) {
 		t.Fatalf("collapsed=%v", res.Candidates)
 	}
 	// Force deletes; tracked survives.
-	res, err = Clean(r, true, true)
+	res, err = Clean(r, true, true, false)
 	if err != nil || !res.Removed {
 		t.Fatal(err)
 	}

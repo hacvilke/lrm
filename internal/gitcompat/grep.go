@@ -9,6 +9,7 @@ import (
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/diff"
+	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/store"
 )
 
@@ -41,18 +42,28 @@ func GrepWorkdir(r *store.Repo, pattern string, ci bool) (*GrepResult, error) {
 	if ci {
 		needle = strings.ToLower(pattern)
 	}
+	ign := merkle.LoadIgnore(r.Root)
+
 	err := filepath.WalkDir(r.Root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || res.Truncated {
 			return nil
 		}
 		if d.IsDir() {
-			if d.Name() == ".lrm" {
+			if d.Name() == ".lrm" || d.Name() == ".git" {
 				return filepath.SkipDir
+			}
+			if rel, rerr := filepath.Rel(r.Root, path); rerr == nil && rel != "." {
+				if ign.Ignored(filepath.ToSlash(rel)) {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
 		rel, err := filepath.Rel(r.Root, path)
 		if err != nil {
+			return nil
+		}
+		if ign.Ignored(filepath.ToSlash(rel)) {
 			return nil
 		}
 		raw, err := readWorkFile(path)

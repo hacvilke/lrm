@@ -76,10 +76,10 @@ func BuildTree(store *cas.Store, root string, opt BuildOptions) (cas.Hash, error
 		opt.Workers = 8
 	}
 	ch := chunker.New(opt.ChunkSize)
-	return buildDir(store, root, root, ch, opt.Workers)
+	return buildDir(store, root, root, ch, opt.Workers, LoadIgnore(root))
 }
 
-func buildDir(store *cas.Store, fsRoot, dir string, ch *chunker.Chunker, workers int) (cas.Hash, error) {
+func buildDir(store *cas.Store, fsRoot, dir string, ch *chunker.Chunker, workers int, ign *Matcher) (cas.Hash, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return cas.Nil, err
@@ -100,8 +100,13 @@ func buildDir(store *cas.Store, fsRoot, dir string, ch *chunker.Chunker, workers
 			continue
 		}
 		full := filepath.Join(dir, e.Name())
+		if rel, err := filepath.Rel(fsRoot, full); err == nil {
+			if ign.Ignored(filepath.ToSlash(rel)) {
+				continue
+			}
+		}
 		if e.IsDir() {
-			sub, err := buildDir(store, fsRoot, full, ch, workers)
+			sub, err := buildDir(store, fsRoot, full, ch, workers, ign)
 			if err != nil {
 				return cas.Nil, err
 			}

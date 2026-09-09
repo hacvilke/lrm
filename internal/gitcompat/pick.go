@@ -1,6 +1,7 @@
 package gitcompat
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,6 +15,18 @@ import (
 type PickResult struct {
 	Hash    string
 	Message string
+}
+
+// PickConflictError reports file-level 3-way conflicts. Rebase detects it
+// via errors.As to stop (rather than fail) for manual resolution.
+type PickConflictError struct {
+	Op    string // "cherry-pick" | "rebase"
+	Files []string
+}
+
+func (e *PickConflictError) Error() string {
+	return fmt.Sprintf("%s conflicts in %d file(s): %v — resolve manually then commit",
+		e.Op, len(e.Files), e.Files)
 }
 
 // CherryPick replays target onto the current branch tip using file-level
@@ -42,24 +55,49 @@ func CherryPick(r *store.Repo, target cas.Hash) (*PickResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("not a commit: %s", cas.Short(target))
 	}
+	msg := strings.TrimSpace(tc.Message) + "\n\ncherry-picked-from: " + cas.Hex(target)[:12]
+	h, err := applyPick(r, target, msg, "cherry-pick")
+	if err != nil {
+		return nil, err
+	}
+	return &PickResult{Hash: cas.Hex(h),
+		Message: fmt.Sprintf("cherry-picked %s onto %s → %s", cas.Short(target), branch, cas.Short(h))}, nil
+}
+
+// applyPick replays target onto the CURRENT tip (whatever branch HEAD points
+// at) with the caller's message, then checks out the result. No workdir
+// gate: callers enforce their own policy (cherry-pick demands clean,
+// rebase --continue commits the resolution's dirty tree).
+func applyPick(r *store.Repo, target cas.Hash, msg, op string) (cas.Hash, error) {
+	tip, _, err := r.HeadCommit()
+	if err != nil {
+		return cas.Nil, err
+	}
+	if tip == cas.Nil {
+		return cas.Nil, fmt.Errorf("no commits yet (nothing to pick onto)")
+	}
+	tc, err := r.DAG.Get(target)
+	if err != nil {
+		return cas.Nil, fmt.Errorf("not a commit: %s", cas.Short(target))
+	}
 	base := map[string]string{}
 	if len(tc.Parents) > 0 {
 		bh, err := cas.ParseHex(tc.Parents[0])
 		if err != nil {
-			return nil, err
+			return cas.Nil, err
 		}
 		base, err = TreeAtCommit(r, bh)
 		if err != nil {
-			return nil, err
+			return cas.Nil, err
 		}
 	}
 	ours, err := TreeAtCommit(r, tip)
 	if err != nil {
-		return nil, err
+		return cas.Nil, err
 	}
 	theirs, err := TreeAtCommit(r, target)
 	if err != nil {
-		return nil, err
+		return cas.Nil, err
 	}
 	paths := map[string]bool{}
 	for p := range base {
@@ -95,22 +133,29 @@ func CherryPick(r *store.Repo, target cas.Hash) (*PickResult, error) {
 	}
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
-		return nil, fmt.Errorf("cherry-pick conflicts in %d file(s): %v — resolve manually then commit", len(conflicts), conflicts)
+		return cas.Nil, &PickConflictError{Op: op, Files: conflicts}
 	}
 	root, err := sync.BuildTreeFromMap(r.CAS, merged)
 	if err != nil {
-		return nil, err
+		return cas.Nil, err
 	}
-	msg := strings.TrimSpace(tc.Message) + "\n\ncherry-picked-from: " + cas.Hex(target)[:12]
 	h, _, err := r.Commit(msg, root)
 	if err != nil {
-		return nil, err
+		return cas.Nil, err
 	}
 	if err := sync.Checkout(r, h); err != nil {
-		return nil, err
+		return cas.Nil, err
 	}
-	return &PickResult{Hash: cas.Hex(h),
-		Message: fmt.Sprintf("cherry-picked %s onto %s → %s", cas.Short(target), branch, cas.Short(h))}, nil
+	return h, nil
+}
+
+// asPickConflict unwraps a *PickConflictError (nil when err is other).
+func asPickConflict(err error) *PickConflictError {
+	var pc *PickConflictError
+	if errors.As(err, &pc) {
+		return pc
+	}
+	return nil
 }
 
 func hasKey(m map[string]string, k string) bool {

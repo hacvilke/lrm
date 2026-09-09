@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/lrm-project/lrm/internal/cas"
+	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/store"
 )
 
@@ -21,8 +22,9 @@ type CleanResult struct {
 
 // Clean finds untracked files. With dirs=true, fully-untracked
 // directories collapse to a single "dir/" entry. Nothing is deleted
-// unless force=true (safe default: dry run).
-func Clean(r *store.Repo, force, dirs bool) (*CleanResult, error) {
+// unless force=true (safe default: dry run). Ignored paths (see
+// .lrmignore) are skipped unless all=true (git clean -x parity).
+func Clean(r *store.Repo, force, dirs, all bool) (*CleanResult, error) {
 	tip, _, err := r.HeadCommit()
 	if err != nil {
 		return nil, err
@@ -37,6 +39,7 @@ func Clean(r *store.Repo, force, dirs bool) (*CleanResult, error) {
 			tracked[p] = true
 		}
 	}
+	ign := merkle.LoadIgnore(r.Root)
 	var files []string
 	seenDirs := map[string]bool{}
 	trackedDirs := map[string]bool{} // dirs containing ≥1 tracked file
@@ -50,8 +53,15 @@ func Clean(r *store.Repo, force, dirs bool) (*CleanResult, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if d.Name() == ".lrm" {
+			if d.Name() == ".lrm" || d.Name() == ".git" {
 				return filepath.SkipDir
+			}
+			if !all && path != r.Root {
+				if rel, rerr := filepath.Rel(r.Root, path); rerr == nil {
+					if ign.Ignored(filepath.ToSlash(rel)) {
+						return filepath.SkipDir
+					}
+				}
 			}
 			if path != r.Root {
 				rel, _ := filepath.Rel(r.Root, path)
@@ -64,6 +74,9 @@ func Clean(r *store.Repo, force, dirs bool) (*CleanResult, error) {
 			return nil
 		}
 		rel = filepath.ToSlash(rel)
+		if !all && ign.Ignored(rel) {
+			return nil
+		}
 		if !tracked[rel] {
 			files = append(files, rel)
 		}

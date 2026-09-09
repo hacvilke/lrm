@@ -80,6 +80,8 @@ func Run(argv []string) int {
 		err = cmdClone(args)
 	case "stash":
 		err = cmdStash(args)
+	case "notes":
+		err = cmdNotes(args)
 	case "reset":
 		err = cmdReset(args)
 	case "fsck":
@@ -94,6 +96,8 @@ func Run(argv []string) int {
 		err = cmdBlame(args)
 	case "cherry-pick", "pick":
 		err = cmdPick(args)
+	case "rebase":
+		err = cmdRebase(args)
 	case "grep":
 		err = cmdGrep(args)
 	case "config":
@@ -150,6 +154,7 @@ Local engine:
   status                                    show branch, tip, pending changes
   commit -m MSG                             version current workspace state
   log [--limit N] [--graph] [--oneline]     show history (graph = ASCII DAG)
+  log --grep STR --author STR               filter history by message/author
   show [REF]                                show a commit + its patches (REF=head/branch/tag/hash)
   diff [REF1 [REF2]] [--stat]               unified patches (or file list)
   branch [--list] [NAME]                    list / create branches
@@ -171,7 +176,7 @@ Git-reverse compat (git spellings, P2P standing):
   push [--peer HOST:PORT]                   sync out to peers (no force-push exists)
   pull | fetch [--peer HOST:PORT]            sync in from peers (bidir in one session)
   clone <PORTKEY> [dir]                     verified dial + full history + checkout
-  stash [push|pop|list]                     shelf / restore workdir deltas
+  stash [push|pop|list|show|drop|clear]     shelf / restore workdir deltas
   reset [--soft|--mixed|--hard] <ref>      move branch ref (± index ± workdir)
   fsck                                      verify CAS reachability from all refs
   gc [--dry-run]                            prune unreachable objects
@@ -180,9 +185,10 @@ Git-reverse compat (git spellings, P2P standing):
   tag -d NAME                               delete a tag
   blame <FILE> [REF]                        line-by-line authorship (first-parent walk)
   cherry-pick <REF>                         replay a commit onto this branch (file-level 3-way)
+  rebase <UPSTREAM> [--continue|--abort]    replay branch commits onto upstream (linear only)
   grep [-i] [-l] <PATTERN> [REF]            literal-substring search (workdir or history)
   config [--list] [user|port [VALUE]]       view / change identity settings
-  clean [-n] [-f] [-d]                      list / delete untracked files (dry run by default)
+  clean [-n] [-f] [-d] [-x]                 list / delete untracked files (dry run by default)
   describe [REF]                            nearest tag name (<tag>[-N-g<short>])
   commit --amend [-m MSG]                   fold workdir state into the tip commit
   checkout -b NAME                          create a branch and switch to it
@@ -191,6 +197,7 @@ Git-reverse compat (git spellings, P2P standing):
   archive [REF] -o FILE [--format F]        export snapshot (tar|tar.gz|zip, streaming)
   shortlog [REF] [--limit N]                commit counts per author
   mv <SRC> <DST>                            rename a workdir file (tracking is automatic)
+  notes add|show|list|remove <REF>           local-only commit annotations (shown by show)
 
 Scripting (LRS runtime + LRQ queries):
   run <SCRIPT.lr> [--report PATH] [--timeout 30s] [-- args...]
@@ -463,7 +470,14 @@ func cmdCommit(args []string) error {
 func cmdLog(args []string) error {
 	graph, args := hasFlag(args, "--graph")
 	oneline, args := hasFlag(args, "--oneline")
+	grepStr, args := flagVal(args, "--grep")
+	authorStr, args := flagVal(args, "--author")
 	limitStr, _ := flagVal(args, "--limit", "-n")
+	grepNeedle := strings.ToLower(grepStr)
+	authorNeedle := strings.ToLower(authorStr)
+	matchLog := func(msg, author string) bool {
+		return matchLogFilter(msg, author, grepNeedle, authorNeedle)
+	}
 	limit := 20
 	if limitStr != "" {
 		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
@@ -490,13 +504,29 @@ func cmdLog(args []string) error {
 		}
 		if oneline && !graph {
 			for _, h := range order {
-				msg := "(missing)"
+				msg, author := "(missing)", ""
 				if c := lookup[h]; c != nil {
-					msg = firstLine(c.Message)
+					msg, author = firstLine(c.Message), c.Author
+				}
+				if !matchLog(msg, author) {
+					continue
 				}
 				fmt.Printf("%s %s\n", cas.Short(h), msg)
 			}
 			return nil
+		}
+		if grepStr != "" || authorStr != "" {
+			kept := make([]cas.Hash, 0, len(order))
+			for _, h := range order {
+				msg, author := "(missing)", ""
+				if c := lookup[h]; c != nil {
+					msg, author = firstLine(c.Message), c.Author
+				}
+				if matchLog(msg, author) {
+					kept = append(kept, h)
+				}
+			}
+			order = kept
 		}
 		fmt.Printf("history of %s:\n", br)
 		for _, row := range RenderGraph(order, lookup) {
@@ -510,6 +540,9 @@ func cmdLog(args []string) error {
 	}
 	fmt.Printf("history of %s:\n", br)
 	for i, c := range commits {
+		if !matchLog(c.Message, c.Author) {
+			continue
+		}
 		fmt.Printf("\ncommit %s\n", cas.Hex(hashes[i]))
 		fmt.Printf("Author: %s (peer %s)\n", c.Author, shortHex(c.PeerHex))
 		fmt.Printf("Date:   %s\n", time.Unix(0, c.Timestamp).Format(time.RFC3339))
@@ -554,6 +587,9 @@ func cmdShow(args []string) error {
 	fmt.Printf("Date:   %s\n", time.Unix(0, c.Timestamp).Format(time.RFC3339))
 	fmt.Printf("Tree:   %s\n", c.Tree)
 	fmt.Printf("Message: %s\n", c.Message)
+	if note, err := gitcompat.NoteShow(r, h); err == nil {
+		fmt.Printf("Notes:\n    %s\n", strings.ReplaceAll(note, "\n", "\n    "))
+	}
 	flat := map[string]string{}
 	th, _ := cas.ParseHex(c.Tree)
 	_ = merkle.Flatten(r.CAS, th, "", flat)

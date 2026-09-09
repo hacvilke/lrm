@@ -63,6 +63,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
 | **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
 | | `bisect` (DAG-correct), `ref-log`, `archive`, `shortlog`, `mv`, `~`/`^` ref suffixes | ✅ |
+| | `rebase` (linear, scratch-branch, continue/abort), `notes`, `.lrmignore`, `stash show/drop/clear`, `log --grep/--author`, GC honors ref-logs | ✅ |
 | **4 — Scripting** | LRS runtime language (`.lr`): sharing + site/network tests, `.txt` reports | ✅ |
 | | LRQ query language (`.lrq`): 8 read-only repo queries, `.txt` reports | ✅ |
 | | `lrm run` / `lrm query` + bare `lrm file.lr` dispatch, tag delete | ✅ |
@@ -77,7 +78,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm init [--user N] [--port P] [path]` | create a repo (identity + CAS + refs + log) |
 | `lrm status` | branch, tip, root hash, pending changes |
 | `lrm commit -m MSG` | version the current Merkle root |
-| `lrm log [--limit N] [--graph] [--oneline]` | history with vector clocks (graph = ASCII DAG) |
+| `lrm log [--limit N] [--graph] [--oneline] [--grep S] [--author A]` | history with vector clocks (graph = ASCII DAG; grep/author filter all modes) |
 | `lrm show [HASH]` | commit detail + file list + unified patches |
 | `lrm diff [H1 [H2]] [--stat]` | unified patches, or file list with `--stat` |
 | `lrm branch [--list] [NAME]` | list / create branches |
@@ -94,7 +95,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm push [--peer H:P]` | sync history out to peers (force-push is impossible by design) |
 | `lrm pull` / `lrm fetch` | sync in from peers (bidirectional in one session) |
 | `lrm clone <PORTKEY> [dir]` | verified dial + full history + checkout |
-| `lrm stash [push\|pop\|list]` | shelf / restore workdir deltas |
+| `lrm stash [push\|pop\|list\|show\|drop\|clear]` | shelf / restore / inspect workdir deltas |
 | `lrm reset [--soft\|--mixed\|--hard] <H>` | move branch ref (± index ± workdir) |
 | `lrm fsck` | verify CAS reachability from all refs |
 | `lrm gc [--dry-run]` | prune unreachable objects |
@@ -103,7 +104,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm cherry-pick <REF>` | replay a commit onto this branch (file-level 3-way) |
 | `lrm grep [-i] [-l] <PAT> [REF]` | literal-substring search in workdir or history |
 | `lrm config [--list] [user\|port [V]]` | view / change identity settings |
-| `lrm clean [-n] [-f] [-d]` | list / delete untracked files (dry run by default) |
+| `lrm clean [-n] [-f] [-d] [-x]` | list / delete untracked files (dry run by default; `-x` includes ignored) |
 | `lrm describe [REF]` | nearest tag (`v1-3-g<short>`) |
 | `lrm commit --amend [-m MSG]` | fold workdir state into the tip commit |
 | `lrm checkout -b NAME` | create a branch and switch to it |
@@ -112,6 +113,8 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm archive [REF] -o FILE [--format F]` | export snapshot (tar\|tar.gz\|zip, streaming) |
 | `lrm shortlog [REF] [--limit N]` | commit counts per author |
 | `lrm mv <SRC> <DST>` | rename a workdir file |
+| `lrm rebase <UP> [--continue\|--abort]` | replay branch commits onto upstream (linear only, atomic move) |
+| `lrm notes add\|show\|list\|remove <REF>` | local-only commit annotations (shown by `show`) |
 | `lrm tag [NAME [HASH]]` | list / create lightweight tags |
 | `lrm tag -d NAME` | delete a tag |
 | `lrm run <S.lr> [--report P] [--timeout D] [-- args]` | run an LRS script, export `.txt` report |

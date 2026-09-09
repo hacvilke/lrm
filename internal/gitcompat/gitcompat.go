@@ -207,21 +207,9 @@ func StashPop(r *store.Repo, name string) (*StashEntry, error) {
 	if len(entries) == 0 {
 		return nil, fmt.Errorf("no stash entries found")
 	}
-	var pick *StashEntry
-	if name == "" {
-		pick = &entries[0]
-	} else {
-		norm := strings.TrimPrefix(strings.TrimPrefix(name, "stash@{"), "}")
-		norm = strings.TrimSuffix(norm, "}")
-		for i, e := range entries {
-			if e.Name == name || e.Name == "stash@{"+norm+"}" {
-				pick = &entries[i]
-				break
-			}
-		}
-		if pick == nil {
-			return nil, fmt.Errorf("unknown stash %q", name)
-		}
+	pick := findStashEntry(entries, name)
+	if pick == nil {
+		return nil, fmt.Errorf("unknown stash %q", name)
 	}
 	h, _ := cas.ParseHex(pick.Commit)
 	c, err := r.DAG.Get(h)
@@ -244,9 +232,9 @@ func StashPop(r *store.Repo, name string) (*StashEntry, error) {
 			return nil, fmt.Errorf("restore %s: %w", p, err)
 		}
 	}
-	// Drop the shelf.
-	shelfFile := strings.TrimPrefix(strings.TrimSuffix(pick.Name, "}"), "stash@{")
-	_ = os.Remove(filepath.Join(shelfDir(r), shelfFile))
+	// Drop the shelf and compact the rest (a pop renumbers, git parity).
+	_ = os.Remove(filepath.Join(shelfDir(r), shelfFileName(pick.Name)))
+	_ = compactShelves(r)
 	return pick, nil
 }
 
@@ -399,22 +387,10 @@ func TagList(r *store.Repo) (map[string]string, error) {
 
 // --- fsck ---
 
-// FsckResult summarizes repository health.
-type FsckResult struct {
-	Commits  int
-	Trees    int
-	Blobs    int
-	Chunks   int
-	Manifests int
-	Missing  []string
-	Bytes    int64
-}
-
-// Fsck walks every ref tip (branches, tags, shelves) and verifies all
-// reachable objects exist in the CAS.
-func Fsck(r *store.Repo) (*FsckResult, error) {
-	res := &FsckResult{}
-	seen := map[cas.Hash]bool{}
+// collectRoots gathers reachability roots: branch heads, tags, shelves,
+// plus ref-log old/new tips — so amended or reset-away commits survive
+// collection while their log entries exist (git kept-by-reflog parity).
+func collectRoots(r *store.Repo) []cas.Hash {
 	var tips []cas.Hash
 	collectRefDir := func(dir string) {
 		ents, err := os.ReadDir(dir)
@@ -437,6 +413,48 @@ func Fsck(r *store.Repo) (*FsckResult, error) {
 	collectRefDir(filepath.Join(r.LrmDir, "refs", "heads"))
 	collectRefDir(tagDir(r))
 	collectRefDir(shelfDir(r))
+	if ents, err := os.ReadDir(filepath.Join(r.LrmDir, "logs", "refs")); err == nil {
+		for _, e := range ents {
+			if e.IsDir() {
+				continue
+			}
+			entries, err := r.ReadReflog(e.Name(), 0)
+			if err != nil {
+				continue
+			}
+			for _, re := range entries {
+				for _, hx := range []string{re.OldHex, re.NewHex} {
+					hx = strings.TrimSpace(hx)
+					if hx == "" || hx == store.ZeroHex {
+						continue
+					}
+					if h, err := cas.ParseHex(hx); err == nil {
+						tips = append(tips, h)
+					}
+				}
+			}
+		}
+	}
+	return tips
+}
+
+// FsckResult summarizes repository health.
+type FsckResult struct {
+	Commits  int
+	Trees    int
+	Blobs    int
+	Chunks   int
+	Manifests int
+	Missing  []string
+	Bytes    int64
+}
+
+// Fsck walks every ref tip (branches, tags, shelves) and verifies all
+// reachable objects exist in the CAS.
+func Fsck(r *store.Repo) (*FsckResult, error) {
+	res := &FsckResult{}
+	seen := map[cas.Hash]bool{}
+	tips := collectRoots(r)
 
 	var walkTree func(h cas.Hash)
 	walkTree = func(h cas.Hash) {
@@ -557,29 +575,8 @@ func GC(r *store.Repo, dryRun bool) (*GCResult, error) {
 	reachable := map[string]bool{}
 	fakeCount := func() {}
 	_ = fakeCount
-	// Walk refs → commits → trees → blobs (mirror of Fsck, recording hex).
-	var tips []cas.Hash
-	collectRefDir := func(dir string) {
-		ents, err := os.ReadDir(dir)
-		if err != nil {
-			return
-		}
-		for _, e := range ents {
-			if e.IsDir() {
-				continue
-			}
-			raw, err := os.ReadFile(filepath.Join(dir, e.Name()))
-			if err != nil {
-				continue
-			}
-			if h, err := cas.ParseHex(strings.TrimSpace(string(raw))); err == nil {
-				tips = append(tips, h)
-			}
-		}
-	}
-	collectRefDir(filepath.Join(r.LrmDir, "refs", "heads"))
-	collectRefDir(tagDir(r))
-	collectRefDir(shelfDir(r))
+	// Walk roots → commits → trees → blobs (mirror of Fsck, recording hex).
+	tips := collectRoots(r)
 
 	mark := func(h cas.Hash) { reachable[strings.ToLower(cas.Hex(h))] = true }
 	seenCommit := map[cas.Hash]bool{}
