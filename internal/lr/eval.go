@@ -23,10 +23,13 @@ func (e *RuntimeError) Error() string { return fmt.Sprintf("runtime error: %s at
 type Env struct {
 	parent *Env
 	vars   map[string]Value
+	consts map[string]bool
 }
 
 // NewEnv creates a child scope (parent may be nil).
-func NewEnv(parent *Env) *Env { return &Env{parent: parent, vars: map[string]Value{}} }
+func NewEnv(parent *Env) *Env {
+	return &Env{parent: parent, vars: map[string]Value{}, consts: map[string]bool{}}
+}
 
 // Get looks up a name through the chain.
 func (e *Env) Get(name string) (Value, bool) {
@@ -40,6 +43,28 @@ func (e *Env) Get(name string) (Value, bool) {
 
 // Define binds a name in the current scope.
 func (e *Env) Define(name string, v Value) { e.vars[name] = v }
+
+// DefineConst binds an immutable name in the current scope.
+func (e *Env) DefineConst(name string, v Value) {
+	e.vars[name] = v
+	e.consts[name] = true
+}
+
+// IsConst reports whether name is a const in this scope or any parent.
+func (e *Env) IsConst(name string) bool {
+	for s := e; s != nil; s = s.parent {
+		if s.consts[name] {
+			return true
+		}
+	}
+	return false
+}
+
+// HasLocal reports whether name is bound in the current scope only.
+func (e *Env) HasLocal(name string) bool {
+	_, ok := e.vars[name]
+	return ok
+}
 
 // Set assigns to the nearest existing binding, else defines in current scope.
 func (e *Env) Set(name string, v Value) {
@@ -159,7 +184,17 @@ func (ev *Evaluator) evalStmt(s Stmt, env *Env) (*signal, *RuntimeError) {
 		if err != nil {
 			return nil, err
 		}
-		env.Define(st.Name, v)
+		if st.Const {
+			if env.HasLocal(st.Name) {
+				return nil, ev.errf(st.Pos, "cannot redeclare %q (already defined in this scope)", st.Name)
+			}
+			env.DefineConst(st.Name, v)
+		} else {
+			if env.consts[st.Name] {
+				return nil, ev.errf(st.Pos, "cannot redeclare const %q", st.Name)
+			}
+			env.Define(st.Name, v)
+		}
 		return noSignal, nil
 	case *AssignStmt:
 		v, err := ev.evalExpr(st.Value, env)
@@ -272,6 +307,12 @@ func (ev *Evaluator) iterItems(v Value, pos Pos) ([]Value, *RuntimeError) {
 	switch v.Kind {
 	case KList:
 		return v.L, nil
+	case KStr:
+		out := make([]Value, 0, len(v.S))
+		for _, r := range v.S {
+			out = append(out, Str(string(r)))
+		}
+		return out, nil
 	case KMap:
 		keys := make([]string, 0, len(v.M))
 		for k := range v.M {
@@ -284,12 +325,15 @@ func (ev *Evaluator) iterItems(v Value, pos Pos) ([]Value, *RuntimeError) {
 		}
 		return out, nil
 	}
-	return nil, ev.errf(pos, "cannot iterate %s (need list or map)", v.TypeName())
+	return nil, ev.errf(pos, "cannot iterate %s (need list, string or map)", v.TypeName())
 }
 
 func (ev *Evaluator) assign(target Expr, v Value, env *Env) *RuntimeError {
 	switch t := target.(type) {
 	case *IdentExpr:
+		if env.IsConst(t.Name) {
+			return ev.errf(t.Pos, "cannot assign to const %q", t.Name)
+		}
 		env.Set(t.Name, v)
 		return nil
 	case *IndexExpr:
@@ -399,26 +443,22 @@ func (ev *Evaluator) evalBinary(x *BinaryExpr, env *Env) (Value, *RuntimeError) 
 			return Null, err
 		}
 		if !l.Truthy() {
-			return False, nil
+			return l, nil
 		}
-		r, err := ev.evalExpr(x.Right, env)
-		if err != nil {
-			return Null, err
-		}
-		return Bool(r.Truthy()), nil
+		return ev.evalExpr(x.Right, env)
 	case T_PipePipe, T_Or:
 		l, err := ev.evalExpr(x.Left, env)
 		if err != nil {
 			return Null, err
 		}
 		if l.Truthy() {
-			return True, nil
+			return l, nil
 		}
 		r, err := ev.evalExpr(x.Right, env)
 		if err != nil {
 			return Null, err
 		}
-		return Bool(r.Truthy()), nil
+		return r, nil
 	}
 	l, err := ev.evalExpr(x.Left, env)
 	if err != nil {

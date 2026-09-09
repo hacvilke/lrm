@@ -94,7 +94,7 @@ func Run(argv []string) int {
 	case "query", "q":
 		err = cmdQuery(args)
 	case "version", "-V", "--version":
-		fmt.Println("lrm version 0.1.0 (sprint build)")
+		fmt.Println("lrm version 0.3.0")
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -127,8 +127,8 @@ Local engine:
   status                                    show branch, tip, pending changes
   commit -m MSG                             version current workspace state
   log [--limit N] [--graph] [--oneline]     show history (graph = ASCII DAG)
-  show [HASH]                               show a commit + its patches
-  diff [HASH1 [HASH2]] [--stat]             unified patches (or file list)
+  show [REF]                                show a commit + its patches (REF=head/branch/tag/hash)
+  diff [REF1 [REF2]] [--stat]               unified patches (or file list)
   branch [--list] [NAME]                    list / create branches
   checkout <BRANCH>                         switch branch (updates workdir)
   merge <BRANCH|HASH>                       merge into current branch
@@ -149,7 +149,7 @@ Git-reverse compat (git spellings, P2P standing):
   pull | fetch [--peer HOST:PORT]            sync in from peers (bidir in one session)
   clone <PORTKEY> [dir]                     verified dial + full history + checkout
   stash [push|pop|list]                     shelf / restore workdir deltas
-  reset [--soft|--mixed|--hard] <commit>    move branch ref (± index ± workdir)
+  reset [--soft|--mixed|--hard] <ref>      move branch ref (± index ± workdir)
   fsck                                      verify CAS reachability from all refs
   gc [--dry-run]                            prune unreachable objects
   remote -v                                 list LIVE peers (nothing to configure)
@@ -178,6 +178,34 @@ func openRepo() (*store.Repo, error) {
 		return nil, err
 	}
 	return store.Open(cwd)
+}
+
+// resolveCommitRef maps HEAD/branch/tag/hash-prefix to a commit hash.
+func resolveCommitRef(r *store.Repo, ref string) (cas.Hash, error) {
+	if ref == "" || ref == "HEAD" {
+		h, _, err := r.HeadCommit()
+		if err != nil {
+			return cas.Nil, err
+		}
+		if h == cas.Nil {
+			return cas.Nil, fmt.Errorf("no commits yet")
+		}
+		return h, nil
+	}
+	if hexStr, _ := r.GetRef(ref); hexStr != "" {
+		return cas.ParseHex(hexStr)
+	}
+	if hexStr, _ := r.GetTag(ref); hexStr != "" {
+		return cas.ParseHex(hexStr)
+	}
+	h, err := r.CAS.Parse(ref)
+	if err != nil {
+		return cas.Nil, fmt.Errorf("unknown ref %q (no branch/tag/hash)", ref)
+	}
+	if !r.DAG.Has(h) {
+		return cas.Nil, fmt.Errorf("ref %q is not a commit", ref)
+	}
+	return h, nil
 }
 
 func flagVal(args []string, names ...string) (string, []string) {
@@ -374,7 +402,7 @@ func cmdShow(args []string) error {
 	defer r.Close()
 	var h cas.Hash
 	if len(args) > 0 {
-		hh, err := r.CAS.Parse(args[0])
+		hh, err := resolveCommitRef(r, args[0])
 		if err != nil {
 			return err
 		}
@@ -463,7 +491,7 @@ func cmdDiff(args []string) error {
 		}
 		newRoot = res.RootHash
 	case 1:
-		h, err := r.CAS.Parse(args[0])
+		h, err := resolveCommitRef(r, args[0])
 		if err != nil {
 			return err
 		}
@@ -478,11 +506,11 @@ func cmdDiff(args []string) error {
 		}
 		newRoot = res.RootHash
 	default:
-		h1, err := r.CAS.Parse(args[0])
+		h1, err := resolveCommitRef(r, args[0])
 		if err != nil {
 			return err
 		}
-		h2, err := r.CAS.Parse(args[1])
+		h2, err := resolveCommitRef(r, args[1])
 		if err != nil {
 			return err
 		}

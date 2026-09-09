@@ -407,3 +407,63 @@ func itoa(n int) string {
 	}
 	return string(b[i:])
 }
+
+func TestCompoundAssign(t *testing.T) {
+	_, _, buf := evalSrc(t, `
+let x = 10;
+x += 1; x -= 2; x *= 3; x /= 3; x %= 8;
+print(x);
+let m = {a: 2};
+m.a += 3;
+print(m.a);
+let l = [4];
+l[0] *= 2;
+print(l[0]);
+let s = "a";
+s += "b";
+print(s);
+`)
+	if buf.String() != "1\n5\n8\nab\n" {
+		t.Fatalf("got %q", buf.String())
+	}
+	mustEvalFail(t, `y += 1;`) // compound assign reads y first: undefined variable
+}
+
+func TestConst(t *testing.T) {
+	_, _, buf := evalSrc(t, `const C = 41; print(C + 1);`)
+	if buf.String() != "42\n" {
+		t.Fatalf("got %q", buf.String())
+	}
+	mustEvalFail(t, `const C = 1; C = 2;`)
+	mustEvalFail(t, `const C = 1; const C = 2;`)
+	mustEvalFail(t, `const C = 1; let C = 2;`)
+	mustEvalFail(t, `const C = 1; C += 1;`)
+}
+
+func TestAndOrOperandValues(t *testing.T) {
+	_, _, buf := evalSrc(t, `
+print(false and "x");
+print(true and "x");
+print(false or "x");
+print(true or "x");
+print(0 or "dflt");
+print(true && 7);
+print(false || 8);
+print(!false);
+`)
+	if buf.String() != "false\nx\nx\ntrue\n0\n7\n8\ntrue\n" {
+		t.Fatalf("got %q", buf.String())
+	}
+}
+
+func TestForOverString(t *testing.T) {
+	_, _, buf := evalSrc(t, `
+let out = "";
+for c in "hé" { out += c + ","; }
+print(out);
+`)
+	if buf.String() != "h,é,\n" {
+		t.Fatalf("got %q", buf.String())
+	}
+	mustEvalFail(t, `for x in 42 { print(x); }`)
+}

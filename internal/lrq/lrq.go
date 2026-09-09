@@ -154,6 +154,11 @@ func lex(src string) ([]tok, error) {
 			for k < len(src) && isTokLetter(src[k]) {
 				k++
 			}
+			// Hash prefixes starting with a digit (3f29e8de) are one word:
+			// extend through any further mixed alphanumerics.
+			for k < len(src) && (isTokLetter(src[k]) || isTokDigit(src[k])) {
+				k++
+			}
 			word := src[i:k]
 			if n, err := strconv.ParseInt(word, 10, 64); err == nil {
 				out = append(out, tok{text: word, num: n, isNo: true, pos: i})

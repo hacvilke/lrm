@@ -19,7 +19,7 @@ optimizes for correctness and clear errors, not JIT speed.
 
 ## 1. Lexical rules
 
-- Comments: `//` to end of line. (No block comments.)
+- Comments: `//` to end of line, or `/* ... */` blocks.
 - Strings: `"..."` with `\"`, `\\`, `\n`, `\t` escapes.
 - Numbers: one `num` type (float64); `18443`, `1.5` both num.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -53,6 +53,7 @@ are all truthy — one rule, no surprises.
 9. `=`: assignment (also `+=`, `-=`, `*=`, `/=`, `%=`)
 
 `and`/`or` short-circuit and return the deciding operand's value.
+Symbolic aliases `&&`, `||`, `!` work identically (`!x` ≡ `not x`).
 
 ## 4. Statements
 

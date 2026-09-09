@@ -28,6 +28,7 @@ const (
 	T_True
 	T_False
 	T_Null
+	T_Const
 	T_And
 	T_Or
 	T_Not
@@ -57,6 +58,11 @@ const (
 	T_GtEq
 	T_AmpAmp
 	T_PipePipe
+	T_PlusEq
+	T_MinusEq
+	T_StarEq
+	T_SlashEq
+	T_PercentEq
 )
 
 // Pos is a 1-based line/column position.
@@ -79,7 +85,7 @@ var keywords = map[string]Tok{
 	"let": T_Let, "fn": T_Fn, "if": T_If, "else": T_Else,
 	"while": T_While, "for": T_For, "in": T_In,
 	"break": T_Break, "continue": T_Continue, "return": T_Return,
-	"true": T_True, "false": T_False, "null": T_Null,
+	"true": T_True, "false": T_False, "null": T_Null, "const": T_Const,
 	"and": T_And, "or": T_Or, "not": T_Not,
 }
 
@@ -294,6 +300,21 @@ func (l *lexer) next() (Token, error) {
 	case "||":
 		l.advance()
 		return Token{Type: T_PipePipe, Text: "||", Pos: p}, nil
+	case "+=":
+		l.advance()
+		return Token{Type: T_PlusEq, Text: "+=", Pos: p}, nil
+	case "-=":
+		l.advance()
+		return Token{Type: T_MinusEq, Text: "-=", Pos: p}, nil
+	case "*=":
+		l.advance()
+		return Token{Type: T_StarEq, Text: "*=", Pos: p}, nil
+	case "/=":
+		l.advance()
+		return Token{Type: T_SlashEq, Text: "/=", Pos: p}, nil
+	case "%=":
+		l.advance()
+		return Token{Type: T_PercentEq, Text: "%=", Pos: p}, nil
 	}
 	switch c {
 	case '(':

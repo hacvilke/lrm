@@ -20,6 +20,7 @@ type LetStmt struct {
 	Pos   Pos
 	Name  string
 	Value Expr
+	Const bool
 }
 
 func (s *LetStmt) stmtPos() Pos { return s.Pos }
@@ -257,6 +258,8 @@ func (p *parser) parseStmt() (Stmt, error) {
 	switch p.peek().Type {
 	case T_Let:
 		return p.parseLet()
+	case T_Const:
+		return p.parseLet()
 	case T_Fn:
 		return p.parseFn()
 	case T_If:
@@ -299,7 +302,8 @@ func (p *parser) parseStmt() (Stmt, error) {
 }
 
 func (p *parser) parseLet() (Stmt, error) {
-	t := p.next() // let
+	t := p.next() // let | const
+	isConst := t.Type == T_Const
 	name, err := p.expect(T_Ident, "variable name")
 	if err != nil {
 		return nil, err
@@ -314,7 +318,7 @@ func (p *parser) parseLet() (Stmt, error) {
 	if _, err := p.expect(T_Semi, "';'"); err != nil {
 		return nil, err
 	}
-	return &LetStmt{Pos: t.Pos, Name: name.Text, Value: v}, nil
+	return &LetStmt{Pos: t.Pos, Name: name.Text, Value: v, Const: isConst}, nil
 }
 
 func (p *parser) parseFn() (Stmt, error) {
@@ -442,13 +446,13 @@ func (p *parser) parseExprOrAssign() (Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p.at(T_Eq) {
+	if p.at(T_Eq) || p.at(T_PlusEq) || p.at(T_MinusEq) || p.at(T_StarEq) || p.at(T_SlashEq) || p.at(T_PercentEq) {
 		switch e.(type) {
 		case *IdentExpr, *IndexExpr, *MemberExpr:
 		default:
 			return nil, &ParseError{Msg: "cannot assign to this expression", Pos: start}
 		}
-		eq := p.next()
+		op := p.next()
 		v, err := p.parseExpr()
 		if err != nil {
 			return nil, err
@@ -456,7 +460,15 @@ func (p *parser) parseExprOrAssign() (Stmt, error) {
 		if _, err := p.expect(T_Semi, "';'"); err != nil {
 			return nil, err
 		}
-		return &AssignStmt{Pos: eq.Pos, Target: e, Value: v}, nil
+		if op.Type != T_Eq {
+			// Desugar: x += v  ==>  x = x + v.
+			binOp := map[Tok]Tok{
+				T_PlusEq: T_Plus, T_MinusEq: T_Minus, T_StarEq: T_Star,
+				T_SlashEq: T_Slash, T_PercentEq: T_Percent,
+			}[op.Type]
+			v = &BinaryExpr{Pos: op.Pos, Op: binOp, Left: e, Right: v}
+		}
+		return &AssignStmt{Pos: op.Pos, Target: e, Value: v}, nil
 	}
 	if _, err := p.expect(T_Semi, "';'"); err != nil {
 		return nil, err

@@ -231,3 +231,64 @@ func TestPeersEmpty(t *testing.T) {
 		t.Fatalf("res=%+v", res)
 	}
 }
+
+func TestDigitLeadingHashRef(t *testing.T) {
+	// Hash prefixes starting with a digit must lex as ONE word.
+	toks, err := lex(`show 3f29e8de;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != 3 || toks[1].text != "3f29e8de" {
+		t.Fatalf("tokens: %+v", toks)
+	}
+	qs := mustParse(t, `commits on 3f29e8de limit 1; files at 481efb4b; show 0abc;`)
+	if qs[0].Ref != "3f29e8de" || qs[1].Ref != "481efb4b" || qs[2].Ref != "0abc" {
+		t.Fatalf("refs: %+v", qs)
+	}
+	// Sizes still lex glued after the fix.
+	qs2 := mustParse(t, `files bigger than 1.5MB; files smaller than 2GB;`)
+	if qs2[0].Bigger != int64(1.5*1024*1024) || qs2[1].Small != 2*1024*1024*1024 {
+		t.Fatalf("sizes: %+v", qs2)
+	}
+}
+
+func TestEngineHashPrefixRef(t *testing.T) {
+	dir := t.TempDir()
+	seedRepo(t, dir)
+	// Find a commit whose hash starts with a digit (certain within tries).
+	r, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var digitHash string
+	for i := 0; i < 40 && digitHash == ""; i++ {
+		name := strings.Join([]string{"pad", string(rune('a' + i%26)), ".txt"}, "")
+		_ = os.WriteFile(filepath.Join(dir, name), []byte(strings.Repeat("x", i+1)), 0o644)
+		res, err := r.Index.Scan(r.Root, r.CAS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, _, err := r.Commit("pad", res.RootHash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Index.UpdateFromScan(r.Root, r.CAS, res.RootHash)
+		_ = r.Index.Save()
+		if hx := cas.Hex(h); hx[0] >= '0' && hx[0] <= '9' {
+			digitHash = hx
+		}
+	}
+	_ = r.Close()
+	if digitHash == "" {
+		t.Skip("no digit-leading hash in 40 tries (astronomically unlikely)")
+	}
+	qf := filepath.Join(dir, "h.lrq")
+	_ = os.WriteFile(qf, []byte("show "+digitHash[:12]+";\nfiles at "+digitHash[:8]+" limit 5;\n"), 0o644)
+	res := RunFile(qf, Options{WorkDir: dir, Out: &bytes.Buffer{}})
+	if !res.Passed {
+		t.Fatalf("res=%+v err=%s", res, res.Error)
+	}
+	if !strings.Contains(res.Tables[0].Render(), digitHash) {
+		t.Fatalf("show table:\n%s", res.Tables[0].Render())
+	}
+}

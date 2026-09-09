@@ -202,7 +202,7 @@ func cmdReset(args []string) error {
 		return err
 	}
 	defer r.Close()
-	h, err := r.CAS.Parse(rest[0])
+	h, err := resolveCommitRef(r, rest[0])
 	if err != nil {
 		return err
 	}
@@ -327,7 +327,7 @@ func cmdTag(args []string) error {
 	name := args[0]
 	var h cas.Hash
 	if len(args) > 1 {
-		hh, err := r.CAS.Parse(args[1])
+		hh, err := resolveCommitRef(r, args[1])
 		if err != nil {
 			return err
 		}
