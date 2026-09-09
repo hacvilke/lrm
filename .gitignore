@@ -1,0 +1,27 @@
+# LRM binaries & local state
+/lrm
+/lrmd
+*.test
+*.out
+
+# LRM repo data (never commit local object stores in tests)
+/.lrm/
+**/.lrm/
+
+# Test fixtures
+/tmp/
+testdata/tmp/
+
+# Go build cache hints
+/vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
