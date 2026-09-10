@@ -83,7 +83,7 @@ func MergeLocal(r *store.Repo, remoteTip cas.Hash, remoteName string) (*LocalMer
 	c := &dag.Commit{
 		Version: 1, Tree: cas.Hex(root),
 		Parents: []string{cas.Hex(localTip), cas.Hex(remoteTip)},
-		Author: r.Config.User, PeerHex: r.Identity.HexID(),
+		Author:  r.Config.User, PeerHex: r.Identity.HexID(),
 		Timestamp: time.Now().UnixNano(), Message: "Merge " + remoteName, Clock: clock,
 	}
 	h, err := r.DAG.Put(c)

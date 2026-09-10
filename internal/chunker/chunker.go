@@ -28,11 +28,11 @@ const (
 // as a CAS object; file trees reference the manifest hash with the
 // "chunked" flag so peers can fetch chunks in parallel from many peers.
 type Manifest struct {
-	Version   int       `json:"version"`
-	ChunkSize int       `json:"chunk_size"`
-	TotalSize int64     `json:"total_size"`
-	Chunks    []string  `json:"chunks"` // hex hashes
-	FileHash  string    `json:"file_hash"`
+	Version   int      `json:"version"`
+	ChunkSize int      `json:"chunk_size"`
+	TotalSize int64    `json:"total_size"`
+	Chunks    []string `json:"chunks"` // hex hashes
+	FileHash  string   `json:"file_hash"`
 }
 
 // Chunker splits streams into fixed-size blocks.

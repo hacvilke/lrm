@@ -29,14 +29,14 @@ const (
 
 // Entry is one replication event.
 type Entry struct {
-	Seq       uint64            `json:"seq"`
-	Time      int64             `json:"time"`
-	Type      EntryType         `json:"type"`
-	PeerHex   string            `json:"peer"`
-	Commit    string            `json:"commit"`
-	Message   string            `json:"message,omitempty"`
-	Clock     vectorclock.Clock `json:"clock,omitempty"`
-	Extra     map[string]string `json:"extra,omitempty"`
+	Seq     uint64            `json:"seq"`
+	Time    int64             `json:"time"`
+	Type    EntryType         `json:"type"`
+	PeerHex string            `json:"peer"`
+	Commit  string            `json:"commit"`
+	Message string            `json:"message,omitempty"`
+	Clock   vectorclock.Clock `json:"clock,omitempty"`
+	Extra   map[string]string `json:"extra,omitempty"`
 }
 
 // Log is an append-only JSONL log.

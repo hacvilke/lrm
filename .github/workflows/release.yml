@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and attach binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build release binaries
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -e
+          mkdir -p dist
+          build() {
+            os=$1; arch=$2; ext=""
+            if [ "$os" = "windows" ]; then ext=".exe"; fi
+            GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "dist/lrm_${os}_${arch}${ext}" ./cmd/lrm
+          }
+          build linux amd64
+          build linux arm64
+          build darwin amd64
+          build darwin arm64
+          build windows amd64
+          cd dist && sha256sum lrm_* > SHA256SUMS.txt && cd ..
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/lrm_*
+            dist/SHA256SUMS.txt

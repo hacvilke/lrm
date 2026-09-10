@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	ssdpAddr     = "239.255.255.250:1900"
-	msearchWait  = 3 * time.Second
-	httpTimeout  = 6 * time.Second
-	urnIPConn    = "urn:schemas-upnp-org:service:WANIPConnection:1"
-	urnPPPConn   = "urn:schemas-upnp-org:service:WANPPPConnection:1"
+	ssdpAddr    = "239.255.255.250:1900"
+	msearchWait = 3 * time.Second
+	httpTimeout = 6 * time.Second
+	urnIPConn   = "urn:schemas-upnp-org:service:WANIPConnection:1"
+	urnPPPConn  = "urn:schemas-upnp-org:service:WANPPPConnection:1"
 )
 
 // Gateway is a discovered UPnP IGD with a usable connection service.

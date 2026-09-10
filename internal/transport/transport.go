@@ -1,12 +1,15 @@
 // Package transport provides authenticated, encrypted peer connections.
 //
 // Handshake (SIGMA-lite over X25519 + Ed25519 + AES-GCM):
+//
 //  1. I → R: ephemeral public key (32B)
+//
 //  2. R → I: ephemeral public key (32B) + sealed(staticPub_R || sig_R)
+//
 //  3. I → R: sealed(staticPub_I || sig_I)
 //
-//   - sig_R = Sign(sk_R, ePub_I || ePub_R); sig_I = Sign(sk_I, ePub_R || ePub_I)
-//   - If the dialer supplies an expected PeerID (from a Port Key) and the
+//     - sig_R = Sign(sk_R, ePub_I || ePub_R); sig_I = Sign(sk_I, ePub_R || ePub_I)
+//     - If the dialer supplies an expected PeerID (from a Port Key) and the
 //     responder's key fingerprint mismatches, the connection is dropped
 //     instantly (MITM protection).
 //
@@ -45,14 +48,14 @@ type PeerKeys struct {
 
 // SecureConn is an encrypted net.Conn.
 type SecureConn struct {
-	raw      net.Conn
-	sendAEAD cipher.AEAD
-	recvAEAD cipher.AEAD
-	sendMu   sync.Mutex
-	sendCtr  uint64
-	recvCtr  uint64
-	readBuf  []byte
-	Remote   PeerKeys
+	raw              net.Conn
+	sendAEAD         cipher.AEAD
+	recvAEAD         cipher.AEAD
+	sendMu           sync.Mutex
+	sendCtr          uint64
+	recvCtr          uint64
+	readBuf          []byte
+	Remote           PeerKeys
 	LocalIsInitiator bool
 }
 

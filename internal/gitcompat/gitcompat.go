@@ -422,13 +422,13 @@ func collectRoots(r *store.Repo) []cas.Hash {
 
 // FsckResult summarizes repository health.
 type FsckResult struct {
-	Commits  int
-	Trees    int
-	Blobs    int
-	Chunks   int
+	Commits   int
+	Trees     int
+	Blobs     int
+	Chunks    int
 	Manifests int
-	Missing  []string
-	Bytes    int64
+	Missing   []string
+	Bytes     int64
 }
 
 // Fsck walks every ref tip (branches, tags, shelves) and verifies all
