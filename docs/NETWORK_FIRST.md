@@ -2,6 +2,16 @@
 
 Status: proposal · Sep 2026
 
+## Progress
+
+- [x] **P0.1 Workspace identity** — shipped: ws in announcements + hello, gate refuses mismatches, genesis-derived legacy ids, v2 Port Keys
+- [x] **P0.2 Node identity + address book + pairing** — shipped: `~/.lrm/node.key`, `peers.json`, `lrm pair` / `devices` / `unpair`, impersonation guard
+- [x] **P1.3 Persistent sessions + presence** — shipped: keepalive ping/pong, RTT presence, glare tie-break, `lrm status` live table, event-driven dial (~2s join)
+- [x] **P1.5 Daemon control** — shipped (in-repo scope): `.lrm/daemon.sock` status/sync/stop; full detach still future
+- [ ] **P1.4 Message envelopes + version negotiation** — pending (sync still speaks the legacy message set)
+- [ ] **P2 WAN ladder** — pending: UDP hole-punch, paired-peer relay, transfer resume
+- [ ] **P3 Peer exchange / events / direct send** — pending
+
 ## 1. Where the effort went
 
 Current non-test line counts:

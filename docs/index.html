@@ -102,8 +102,8 @@ encrypted and content-addressed).
 <table>
   <tr><th>Area</th><th>What you get</th></tr>
   <tr><td>Local engine</td><td>Instant parallel Merkle trees, SHA-256 CAS, automatic 4KB–1MB file chunking, unified line diffs</td></tr>
-  <tr><td>P2P mesh</td><td>Zero-config LAN discovery (mDNS + UDP), X25519/Ed25519/AES-GCM encrypted mux, UPnP + NAT-PMP port mapping, STUN, secure Port Key dial strings</td></tr>
-  <tr><td>Sync engine</td><td>Commit DAG + vector clocks, LCA merge-base, have/want negotiation, fast-forward + 3-way auto-merge, conflict branches (<code>HEAD-peer-&lt;short&gt;</code>, never overwrites), append-only replication log, real-time daemon (~2s peer latency)</td></tr>
+  <tr><td>P2P mesh</td><td>Zero-config LAN discovery (mDNS + UDP), X25519/Ed25519/AES-GCM encrypted mux, UPnP + NAT-PMP port mapping, STUN, secure Port Key dial strings, workspace-scoped sync, device pairing (node identity + address book)</td></tr>
+  <tr><td>Sync engine</td><td>Commit DAG + vector clocks, LCA merge-base, have/want negotiation, fast-forward + 3-way auto-merge, conflict branches (<code>HEAD-peer-&lt;short&gt;</code>, never overwrites), append-only replication log, real-time daemon (~2s peer latency), persistent sessions with keepalive + live presence table (<code>lrm status</code>)</td></tr>
   <tr><td>Git-reverse++</td><td><code>blame</code>, <code>cherry-pick</code>, <code>grep</code>, <code>clean</code>, <code>describe</code>, <code>amend</code>, DAG-correct <code>bisect</code>, <code>ref-log</code>, <code>archive</code>, <code>shortlog</code>, <code>rebase</code> (+ continue/abort), <code>notes</code>, <code>.lrmignore</code>, <code>stash</code> (7 verbs), <code>branch -d</code>, <code>rev-parse</code>, <code>merge-base</code>, <code>cherry</code>, <code>check-ignore</code>, <code>~</code>/<code>^</code> ref suffixes</td></tr>
   <tr><td>Scripting</td><td>LRS runtime language (<code>.lr</code>) + LRQ read-only repo queries (<code>.lrq</code>), both with <code>.txt</code> reports</td></tr>
 </table>
@@ -154,6 +154,7 @@ Full table in the <a href="https://github.com/hacvilke/lrm/blob/main/docs/GIT_RE
   <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/PROTOCOL.md">Wire protocol</a> — mux streams and message formats</li>
   <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/WAN_PORTKEY_SPEC.md">Port Key spec</a> — secure dial strings</li>
   <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/LRSPEC.md">LRS spec</a> + <a href="https://github.com/hacvilke/lrm/blob/main/docs/LRQSPEC.md">LRQ spec</a> — scripting and query languages</li>
+  <li><a href="https://github.com/hacvilke/lrm/blob/main/docs/NETWORK_FIRST.md">Network-first direction</a> — the mesh is the product: audit, native model (node / workspace / pairing / session), build order P0–P3</li>
 </ul>
 
 <h2 id="source">source</h2>
@@ -166,6 +167,8 @@ Project home: <a href="https://github.com/hacvilke/lrm">github.com/hacvilke/lrm<
 
 <h2 id="roadmap">roadmap</h2>
 <ul>
+  <li>Message envelopes + version negotiation on every wire message</li>
+  <li>UDP hole punching and paired-peer relay for CGNAT reachability</li>
   <li>STUN/ICE UDP hole punching for symmetric NATs</li>
   <li>DHT peer routing (Kademlia) for global discovery without key exchange</li>
   <li>Delta-compressed object transfer for huge binaries</li>

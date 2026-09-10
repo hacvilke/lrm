@@ -28,6 +28,10 @@ lrm commit -m "first commit"
 lrm peers                    # → alice @ 192.168.1.5:8443  ws:1a2b3c4d (same)
 lrm daemon                   # background real-time sync (both sides)
 
+# Pair your machines once — trust crosses all workspaces:
+lrm pair                     # print this device's invite
+lrm pair <invite> laptop     # on the other machine; paste its invite back
+
 # Different Wi-Fi / across the globe: Alice shares a Port Key
 lrm share
 # → lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
@@ -48,6 +52,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Line diffs / unified patches, binary detection | ✅ |
 | **2 — P2P mesh** | Zero-config LAN discovery (mDNS `_lrm._tcp` + UDP broadcast) | ✅ |
 | | Workspace identity — mesh scoping: strangers on shared Wi-Fi never sync (legacy repos derive it from genesis; v2 Port Keys carry it) | ✅ |
+| | Device identity + pairing — one node key per machine (`~/.lrm/`), address book, self-verifying invites (`lrm pair`) | ✅ |
 | | Authenticated encryption (X25519 + Ed25519 + AES-GCM, MITM-drop) | ✅ |
 | | Streaming multiplexer (N concurrent streams / 1 connection) | ✅ |
 | | UPnP auto port mapping (SSDP → SOAP) | ✅ |
@@ -62,6 +67,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Automated conflict branching (`HEAD-peer-<short>`, never overwrites) | ✅ |
 | | Replication log (append-only JSONL audit trail) | ✅ |
 | | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
+| | Persistent sessions — keepalive ping/pong, RTT presence table, deterministic glare tie-break, live control socket | ✅ |
 | **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
 | | `bisect` (DAG-correct), `ref-log`, `archive`, `shortlog`, `mv`, `~`/`^` ref suffixes | ✅ |
 | | `rebase` (linear, scratch-branch, continue/abort), `notes`, `.lrmignore`, `stash show/drop/clear`, `log --grep/--author`, GC honors ref-logs | ✅ |
@@ -78,7 +84,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | Command | What it does |
 |---------|--------------|
 | `lrm init [--user N] [--port P] [path]` | create a repo (identity + CAS + refs + log) |
-| `lrm status` | branch, tip, root hash, pending changes |
+| `lrm status` | branch, tip, root hash, pending changes + live presence table (via daemon control socket) |
 | `lrm commit -m MSG` | version the current Merkle root |
 | `lrm log [--limit N] [--graph] [--oneline] [--grep S] [--author A]` | history with vector clocks (graph = ASCII DAG; grep/author filter all modes) |
 | `lrm show [HASH]` | commit detail + file list + unified patches |
@@ -93,7 +99,10 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm share [--port P] [--no-upnp] [--no-natpmp]` | map router port, print Port Key |
 | `lrm join <PORTKEY> [--init]` | verified dial + full history sync |
 | `lrm sync [--peer H:P]` | sync with LAN peers (or one peer) |
-| `lrm daemon [--port P]` | real-time engine: watch + announce + sync |
+| `lrm daemon [--port P] [--peer H:P]` | real-time engine: watch + announce + sync + keepalive (+ a continuously-dialed static peer) |
+| `lrm pair [INVITE] [NAME]` | device pairing — prints your invite, or pairs with the invite's device (works outside any repo) |
+| `lrm devices` | list the paired-device address book |
+| `lrm unpair <ID>` | remove a paired device (id or unique short prefix) |
 | `lrm add [paths...]` | confirm auto-tracked paths (the `add` ritual, reversed away) |
 | `lrm push [--peer H:P]` | sync history out to peers (force-push is impossible by design) |
 | `lrm pull` / `lrm fetch` | sync in from peers (bidirectional in one session) |

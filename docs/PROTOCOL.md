@@ -60,7 +60,9 @@ u32 streamID || u8 flags || u32 payloadLen || payload[..]
 
 | Type | Direction | Fields | Meaning |
 |------|-----------|--------|---------|
-| `hello` | both | `peer, branch, heads[], ws, extra{user}` | advertise identity + branch tips + workspace |
+| `hello` | both | `peer, branch, heads[], ws, extra{user,node,nodepub}` | advertise identity + branch tips + workspace + device |
+| `ping` | dialer → peer | `heads[tip]` | keepalive; carries the dialer's tip |
+| `pong` | peer → dialer | `heads[tip]` | keepalive reply with the responder's tip |
 | `want` | → peer | `want[commitHex…]` | request commits by hash |
 | `have` | → peer | `commits[commitJSON…]` | commit bodies (small, inline) |
 | `want-objects` | → peer | `objects[hex…], extra{stream}` | request blobs/trees/chunks; data follows on a fresh mux stream |
@@ -87,6 +89,20 @@ history keep syncing after upgrading. `lrm config workspace <hex>` is the
 explicit escape hatch for deliberately merging two independently-started
 histories (disjoint histories still land on conflict branches — nothing is
 ever overwritten).
+
+### Persistent sessions & keepalive
+
+After a completed sync the dialer may keep the control stream open
+(daemon mode). The responder keeps serving after `done` until the stream
+is FIN'd or the connection drops; one-shot dialers FIN the stream when
+their sync returns. The dialer pings every 15s (10s pong timeout); the
+responder pongs with its tip, and closes the whole session when the
+dialer's tip is news to it (hang-up-and-callback: both sides re-dial and
+fetch). Simultaneous cross-dials (glare) converge deterministically: both
+sides keep the session whose initiator has the lower PeerID.
+
+hello extras: `user` (display name), `node` / `nodepub` (device identity
+from the pairing layer, may be absent).
 
 ### Object bulk stream
 
@@ -153,3 +169,13 @@ lrm_key: [IP|DDNS]:[port]@[64-hex PeerID]
 ```
 
 See [`WAN_PORTKEY_SPEC.md`](WAN_PORTKEY_SPEC.md) for the mapping pipeline.
+
+## 6. Control socket (`internal/daemon`)
+
+The daemon serves a line-JSON API on `<repo>/.lrm/daemon.sock`:
+
+| Request | Response |
+|---------|----------|
+| `{"cmd":"status"}` | `{ok, user, workspace, node, uptime_sec, peers:[{user,peer,addr,state,since,rtt_ms}]}` |
+| `{"cmd":"sync"}` | `{ok, triggered:true}` — immediate dial + keepalive nudge round |
+| `{"cmd":"stop"}` | `{ok, stopping:true}` — graceful shutdown (port mappings torn down) |
