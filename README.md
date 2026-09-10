@@ -205,12 +205,19 @@ examples/           check_site.lr, share_team.lr, repo.lrq
 ```bash
 make test        # unit + integration (sync, conflicts, merges over mux)
 make test-race   # with the race detector
+scripts/check-all.sh ./lrm   # FULL CLI sweep: every command + live daemon + LRS/LRQ (90 checks)
 ./lrm peers      # live LAN check (needs a teammate running lrm daemon)
 ```
 
+`scripts/check-all.sh` builds a scratch workspace and exercises the whole
+surface — core history, git-compat commands, device pairing, a real mesh
+(join/clone/share/send/watch against a live daemon, including the
+stranger-refusal path), and both languages. It runs in CI on every push:
+if a command breaks, the build breaks.
+
 ## Roadmap
 
-- [ ] STUN/ICE UDP hole punching for symmetric NATs (TCP mapping covers most routers today)
+- [ ] UDP/ICE hole punching for symmetric NATs (TCP simultaneous-open punching shipped; relay covers the rest)
 - [ ] DHT peer routing (Kademlia) for global discovery without key exchange
 - [ ] Delta-compressed object transfer (xdelta) for huge binaries
 - [ ] FUSE workdir overlay for instant multi-GB checkouts

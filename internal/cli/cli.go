@@ -1389,6 +1389,13 @@ func cmdShare(args []string) error {
 	_ = pmpGW
 	_ = pmpExt
 	// Step C: public IP.
+	// LRM_SHARE_IP overrides discovery (static IPs, DDNS, known-address
+	// offline/test environments).
+	if ip := net.ParseIP(os.Getenv("LRM_SHARE_IP")); ip != nil {
+		publicIP = ip
+		fmt.Printf("OK (%s via LRM_SHARE_IP)", ip.String())
+		fmt.Println()
+	}
 	fmt.Print("[3/3] Fetch Public IP (STUN)... ")
 	if upnpOK && gw != nil {
 		if ip, err := gw.ExternalIP(); err == nil && ip != nil {

@@ -31,6 +31,10 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test ./... -count=1
+      - name: CLI surface sweep (every command, live daemon)
+        run: |
+          go build -o /tmp/lrm ./cmd/lrm
+          scripts/check-all.sh /tmp/lrm
 
   build-matrix:
     name: cross-build (${{ matrix.goos }}/${{ matrix.goarch }})
