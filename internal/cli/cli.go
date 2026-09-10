@@ -21,6 +21,7 @@ import (
 	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
+	"github.com/lrm-project/lrm/internal/node"
 	"github.com/lrm-project/lrm/internal/patch"
 	"github.com/lrm-project/lrm/internal/portkey"
 	"github.com/lrm-project/lrm/internal/store"
@@ -67,6 +68,12 @@ func Run(argv []string) int {
 		err = cmdSync(args)
 	case "daemon", "d":
 		err = cmdDaemon(args)
+	case "pair":
+		err = cmdPair(args)
+	case "devices":
+		err = cmdDevices(args)
+	case "unpair":
+		err = cmdUnpair(args)
 	case "cat-file", "cat":
 		err = cmdCatFile(args)
 	case "replog":
@@ -408,6 +415,107 @@ func cmdInit(args []string) error {
 	return nil
 }
 
+// cmdPair manages device pairing (works outside any repo):
+//
+//	lrm pair                    → print this machine's invite
+//	lrm pair <invite> [name]    → pair with the machine behind the invite
+func cmdPair(args []string) error {
+	id, err := node.LoadOrCreateIdentity()
+	if err != nil {
+		return fmt.Errorf("device identity: %w", err)
+	}
+	book, err := node.LoadBook()
+	if err != nil {
+		return fmt.Errorf("address book: %w", err)
+	}
+	if len(args) == 0 {
+		fmt.Printf("this device:  node %s\n", id.ShortID())
+		fmt.Printf("paired:       %d device(s)\n", book.Count())
+		fmt.Println()
+		fmt.Println("Your pairing invite (send it over any channel you trust):")
+		fmt.Println()
+		fmt.Printf("  %s\n", node.Invite(id))
+		fmt.Println()
+		fmt.Println("On the OTHER machine run:  lrm pair <invite>")
+		fmt.Println("then paste ITS invite back here the same way.")
+		return nil
+	}
+	pub, err := node.VerifyInvite(args[0])
+	if err != nil {
+		return fmt.Errorf("bad invite: %w", err)
+	}
+	name := ""
+	if len(args) > 1 {
+		name = args[1]
+	}
+	peerID, err := book.Pair(pub, name)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("paired ✓ device %s", peerID[:8])
+	if name != "" {
+		fmt.Printf(" (%s)", name)
+	}
+	fmt.Println()
+	fmt.Println()
+	fmt.Println("Complete the handshake — give THIS invite to the other machine:")
+	fmt.Println()
+	fmt.Printf("  %s\n", node.Invite(id))
+	fmt.Println()
+	fmt.Println("(run `lrm pair <invite above>` there; `lrm devices` lists everyone)")
+	return nil
+}
+
+// cmdDevices lists the paired-device address book.
+func cmdDevices(args []string) error {
+	_ = args
+	book, err := node.LoadBook()
+	if err != nil {
+		return err
+	}
+	entries := book.List()
+	if id, err := node.LoadOrCreateIdentity(); err == nil {
+		fmt.Printf("this device: node %s\n", id.ShortID())
+	}
+	if len(entries) == 0 {
+		fmt.Println("no paired devices (see `lrm pair`)")
+		return nil
+	}
+	fmt.Printf("%d paired device(s)\n", len(entries))
+	for _, e := range entries {
+		user := e.User
+		if user == "" {
+			user = "-"
+		}
+		last := "never"
+		if !e.LastSeen.IsZero() {
+			last = e.LastSeen.Format("2006-01-02 15:04")
+		}
+		addrs := "-"
+		if len(e.Addrs) > 0 {
+			addrs = strings.Join(e.Addrs, ", ")
+		}
+		fmt.Printf("  %-12s %s  last seen: %s  at: %s\n", user, e.PeerID()[:8], last, addrs)
+	}
+	return nil
+}
+
+// cmdUnpair removes a paired device by PeerID (or unique short prefix).
+func cmdUnpair(args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: lrm unpair <peer-id-prefix>")
+	}
+	book, err := node.LoadBook()
+	if err != nil {
+		return err
+	}
+	if err := book.Unpair(args[0]); err != nil {
+		return err
+	}
+	fmt.Println("unpaired ✓")
+	return nil
+}
+
 func cmdStatus(args []string) error {
 	_ = args
 	r, err := openRepo()
@@ -424,6 +532,16 @@ func cmdStatus(args []string) error {
 		fmt.Printf("tip:    %s\n", tipHex[:12])
 	}
 	fmt.Printf("peer:   %s (%s)\n", r.Identity.ShortID(), r.Config.User)
+	if r.Config.Workspace != "" {
+		fmt.Printf("workspace: %s\n", r.Config.Workspace)
+	} else {
+		fmt.Println("workspace: (unset — legacy repo; derived at first sync)")
+	}
+	if id, err := node.LoadOrCreateIdentity(); err == nil {
+		if book, err := node.LoadBook(); err == nil {
+			fmt.Printf("device: node %s (%d paired)\n", id.ShortID(), book.Count())
+		}
+	}
 	res, err := r.Index.Scan(r.Root, r.CAS)
 	if err != nil {
 		return err
@@ -989,6 +1107,10 @@ func cmdPeers(args []string) error {
 	}
 	// Tag peers with their workspace so foreign projects on shared Wi-Fi
 	// are visible at a glance.
+	var book *node.Book
+	if b, err := node.LoadBook(); err == nil {
+		book = b
+	}
 	shown := 0
 	for _, p := range peers {
 		if p.PeerHex == self {
@@ -1003,7 +1125,11 @@ func cmdPeers(args []string) error {
 		default:
 			tag = "other"
 		}
-		fmt.Printf("  %-8s %-16s ws:%-8s %s (%s)\n", p.User, p.Addr(), wsTag(p.WS), tag, p.Source)
+		dev := ""
+		if book != nil && p.NodeHex != "" && book.Get(p.NodeHex) != nil {
+			dev = " dev✓"
+		}
+		fmt.Printf("  %-8s %-16s ws:%-8s %s%s (%s)\n", p.User, p.Addr(), wsTag(p.WS), tag, dev, p.Source)
 		shown++
 	}
 	if shown == 0 {
@@ -1326,7 +1452,11 @@ func cmdDaemon(args []string) error {
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fmt.Printf("LRM daemon starting (user %s, peer %s, port %d)\n", r.Config.User, r.Identity.ShortID(), port)
+	nodeInfo := ""
+	if id, err := node.LoadOrCreateIdentity(); err == nil {
+		nodeInfo = fmt.Sprintf(", device %s", id.ShortID())
+	}
+	fmt.Printf("LRM daemon starting (user %s, peer %s%s, port %d)\n", r.Config.User, r.Identity.ShortID(), nodeInfo, port)
 	fmt.Println("watching workspace + announcing on LAN. Ctrl-C to stop (mappings will be removed).")
 	if err := d.Run(ctx); err != nil {
 		return err

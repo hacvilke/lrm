@@ -47,6 +47,10 @@ type Msg struct {
 // Engine syncs one repo with peers.
 type Engine struct {
 	Repo *store.Repo
+	// NodeHex/NodePub identify the MACHINE (pairing layer), advertised in
+	// the hello extras. Optional — CLI one-shot syncs leave them empty.
+	NodeHex string
+	NodePub string
 }
 
 // New creates an Engine.
@@ -55,6 +59,9 @@ func New(r *store.Repo) *Engine { return &Engine{Repo: r} }
 // SyncResult summarizes a sync session.
 type SyncResult struct {
 	RemotePeer     string
+	RemoteUser     string
+	RemoteNode     string // remote device node PeerID (pairing layer, may be "")
+	RemoteNodePub  string
 	Fetched        int
 	Pushed         int
 	MergedCommit   string
@@ -86,6 +93,9 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 			return res, fmt.Errorf("remote refused sync: %s", hello.Error)
 		}
 		res.RemotePeer = hello.Peer
+		res.RemoteUser = hello.Extra["user"]
+		res.RemoteNode = hello.Extra["node"]
+		res.RemoteNodePub = hello.Extra["nodepub"]
 		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
 			return res, err
 		}
@@ -102,6 +112,9 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 			return nil, err
 		}
 		res.RemotePeer = hello.Peer
+		res.RemoteUser = hello.Extra["user"]
+		res.RemoteNode = hello.Extra["node"]
+		res.RemoteNodePub = hello.Extra["nodepub"]
 		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
 			return res, err
 		}
@@ -157,10 +170,17 @@ func (e *Engine) writeHello(w io.Writer) error {
 		heads = append(heads, tipHex)
 	}
 	_ = branches
+	extra := map[string]string{"user": e.Repo.Config.User}
+	if e.NodeHex != "" {
+		extra["node"] = e.NodeHex
+	}
+	if e.NodePub != "" {
+		extra["nodepub"] = e.NodePub
+	}
 	return writeMsg(w, Msg{
 		Type: "hello", Peer: e.Repo.Identity.HexID(), Branch: br, Heads: heads,
 		WS:    e.Repo.Config.Workspace,
-		Extra: map[string]string{"user": e.Repo.Config.User},
+		Extra: extra,
 	})
 }
 

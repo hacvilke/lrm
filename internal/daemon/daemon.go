@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"github.com/lrm-project/lrm/internal/mdns"
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
+	"github.com/lrm-project/lrm/internal/node"
 	"github.com/lrm-project/lrm/internal/staging"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
@@ -65,7 +67,11 @@ type Daemon struct {
 	natMappedPort uint16
 	onSync        func(*lrmsync.SyncResult)
 	onChange      func(int)
+	onEvent       func(string)
 	shutdownOnce  sync.Once
+	// Device layer (pairing): machine-wide node identity + address book.
+	nodeID *node.Identity
+	book   *node.Book
 }
 
 type peerConn struct {
@@ -80,6 +86,16 @@ func (d *Daemon) OnSync(fn func(*lrmsync.SyncResult)) { d.onSync = fn }
 // OnChange sets a callback for auto-commits (n = files changed).
 func (d *Daemon) OnChange(fn func(int)) { d.onChange = fn }
 
+// OnEvent sets a callback for mesh events (may be nil).
+func (d *Daemon) OnEvent(fn func(string)) { d.onEvent = fn }
+
+// event emits a mesh event if a listener is attached.
+func (d *Daemon) event(format string, args ...any) {
+	if d.onEvent != nil {
+		d.onEvent(fmt.Sprintf(format, args...))
+	}
+}
+
 // New creates (but does not start) a daemon for an open repo.
 func New(repo *store.Repo, cfg Config) *Daemon {
 	if cfg.Port == 0 {
@@ -93,8 +109,18 @@ func New(repo *store.Repo, cfg Config) *Daemon {
 	}
 	d := &Daemon{repo: repo, cfg: cfg, pins: map[string]string{}, dialNow: make(chan struct{}, 1)}
 	d.loadPins()
+	// Device layer (best-effort: pairing features no-op on failure).
+	if id, err := node.LoadOrCreateIdentity(); err == nil {
+		d.nodeID = id
+	}
+	if book, err := node.LoadBook(); err == nil {
+		d.book = book
+	}
 	return d
 }
+
+// NodeID returns the machine's node identity (nil if unavailable).
+func (d *Daemon) NodeID() *node.Identity { return d.nodeID }
 
 // requestDial triggers an immediate dial round (non-blocking, coalescing).
 func (d *Daemon) requestDial() {
@@ -130,8 +156,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
 		d.cfg.Port = addr.Port
 	}
-	// 2. LAN announcements.
-	d.adv = mdns.StartAdvertiser(d.repo.Identity.HexID(), d.repo.Identity.HexPub(), d.repo.Config.Workspace, d.repo.Config.User, d.cfg.Port, 2*time.Second)
+	// 2. LAN announcements (repo identity + workspace + device identity).
+	nodeHex, nodePubHex := "", ""
+	if d.nodeID != nil {
+		nodeHex, nodePubHex = d.nodeID.HexID(), hex.EncodeToString(d.nodeID.Pub)
+	}
+	d.adv = mdns.StartAdvertiser(d.repo.Identity.HexID(), d.repo.Identity.HexPub(), nodeHex, nodePubHex, d.repo.Config.Workspace, d.repo.Config.User, d.cfg.Port, 2*time.Second)
 
 	var wg sync.WaitGroup
 	wg.Add(5)
@@ -207,11 +237,13 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 	d.peers.Store(peerHex, &peerConn{peer: mdns.Peer{PeerHex: peerHex, SeenAt: time.Now(), Source: "inbound"}, secure: sc, sess: sess})
 	defer d.peers.Delete(peerHex)
 	eng := lrmsync.New(d.repo)
+	d.stampNode(eng)
 	res, err := eng.SyncWithSession(sess, false, "")
 	_ = sess.Close()
 	if err != nil {
 		return
 	}
+	d.learnPeer(res, sc.RemoteAddr().String())
 	if d.onSync != nil {
 		d.onSync(res)
 	}
@@ -270,6 +302,15 @@ func (d *Daemon) dialKnownPeers(ctx context.Context) {
 		if _, ok := d.peers.Load(p.PeerHex); ok {
 			return true // already connected
 		}
+		// Paired-device key pinning: if the announced device id is in the
+		// address book but the announced device key does not match the
+		// pinned one, refuse to dial (possible impersonation).
+		if d.book != nil && p.NodeHex != "" {
+			if e := d.book.Get(p.NodeHex); e != nil && p.NodePub != "" && p.NodePub != e.Pub {
+				d.event("device key mismatch for %s (%s) — not dialing", p.User, shortNodeHex(p.NodeHex))
+				return true
+			}
+		}
 		if _, dialing := d.dialMu.LoadOrStore(p.PeerHex, struct{}{}); dialing {
 			return true // dial already in flight
 		}
@@ -312,16 +353,63 @@ func (d *Daemon) dialPeer(ctx context.Context, p mdns.Peer) {
 	d.peers.Store(peerHex, &peerConn{peer: p, secure: sc, sess: sess})
 	defer func() { d.peers.Delete(peerHex); _ = sess.Close() }()
 	eng := lrmsync.New(d.repo)
+	d.stampNode(eng)
 	res, err := eng.SyncWithSession(sess, true, "")
 	if err != nil {
 		return
 	}
+	d.learnPeer(res, addr)
 	if d.onSync != nil {
 		d.onSync(res)
 	}
 	if res.FastForwarded || res.MergedCommit != "" {
 		d.requestDial() // our tip advanced — propagate to OTHER peers now
 	}
+}
+
+// stampNode attaches the machine's device identity to an engine so hellos
+// carry it (empty = feature off).
+func (d *Daemon) stampNode(eng *lrmsync.Engine) {
+	if d.nodeID != nil {
+		eng.NodeHex = d.nodeID.HexID()
+		eng.NodePub = hex.EncodeToString(d.nodeID.Pub)
+	}
+}
+
+// learnPeer refreshes the address book for a paired device we just synced
+// with (learning never creates trust — only paired entries are touched).
+func (d *Daemon) learnPeer(res *lrmsync.SyncResult, addr string) {
+	if d.book == nil || res.RemoteNode == "" || res.RemoteNodePub == "" {
+		return
+	}
+	if e := d.book.Get(res.RemoteNode); e == nil {
+		return
+	}
+	var addrs []string
+	if addr != "" {
+		addrs = []string{addr}
+	}
+	d.book.Touch(res.RemoteNodePub, res.RemoteUser, addrs)
+	d.event("paired device %s seen at %s", peerLabel(res), addr)
+}
+
+// peerLabel renders "user (short-id)" for events.
+func peerLabel(res *lrmsync.SyncResult) string {
+	if res.RemoteUser != "" {
+		return res.RemoteUser
+	}
+	if len(res.RemoteNode) >= 8 {
+		return res.RemoteNode[:8]
+	}
+	return res.RemoteNode
+}
+
+// shortNodeHex truncates a node id for display.
+func shortNodeHex(s string) string {
+	if len(s) > 8 {
+		return s[:8]
+	}
+	return s
 }
 
 // --- file watcher → instant auto-versioning (Figma vibe) ---
