@@ -38,6 +38,7 @@ type Peer struct {
 	PubKey  string   `json:"pub,omitempty"` // hex ed25519 pub (for TOFU verify)
 	User    string   `json:"user"`
 	Port    int      `json:"port"`
+	WS      string   `json:"ws,omitempty"` // workspace id hex (mesh scoping)
 	Addrs   []string `json:"addrs,omitempty"`
 	SeenAt  time.Time
 	Source  string // "broadcast" | "mdns"
@@ -58,6 +59,7 @@ type Announcement struct {
 	Pub     string `json:"pub"`
 	User    string `json:"user"`
 	Port    int    `json:"port"`
+	WS      string `json:"ws,omitempty"` // workspace id hex
 }
 
 // Advertiser periodically announces this node on the LAN.
@@ -68,12 +70,14 @@ type Advertiser struct {
 }
 
 // StartAdvertiser begins LAN announcements every interval until Stop.
-func StartAdvertiser(peerHex, pubHex, user string, port int, interval time.Duration) *Advertiser {
+// wsHex is the workspace ID this node's repo belongs to (may be empty for
+// legacy repos — announced without a workspace).
+func StartAdvertiser(peerHex, pubHex, wsHex, user string, port int, interval time.Duration) *Advertiser {
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
 	a := &Advertiser{
-		ann:    Announcement{Version: 1, Peer: peerHex, Pub: pubHex, User: user, Port: port},
+		ann:    Announcement{Version: 1, Peer: peerHex, Pub: pubHex, User: user, Port: port, WS: wsHex},
 		stopCh: make(chan struct{}),
 	}
 	a.wg.Add(1)
@@ -225,7 +229,7 @@ func listenBroadcast(ctx context.Context, cb func(Peer)) {
 			host = raddr.IP.String()
 		}
 		cb(Peer{
-			PeerHex: ann.Peer, PubKey: ann.Pub, User: ann.User, Port: ann.Port,
+			PeerHex: ann.Peer, PubKey: ann.Pub, User: ann.User, Port: ann.Port, WS: ann.WS,
 			Addrs: []string{host}, SeenAt: time.Now(), Source: "broadcast",
 		})
 	}
@@ -382,7 +386,7 @@ func parseTXT(rdata []byte) *Peer {
 	if !ok || peer == "" {
 		return nil
 	}
-	p := &Peer{PeerHex: peer, PubKey: kv["pub"], User: kv["user"]}
+	p := &Peer{PeerHex: peer, PubKey: kv["pub"], User: kv["user"], WS: kv["ws"]}
 	if pt := kv["port"]; pt != "" {
 		var n int
 		_, _ = fmt.Sscanf(pt, "%d", &n)

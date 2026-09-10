@@ -41,3 +41,18 @@ func (r *Repo) SetPort(port int) error {
 	r.Config.Port = port
 	return nil
 }
+
+// SetWorkspace validates and stages the workspace ID (call SaveConfig after).
+// This is the explicit escape hatch for merging two independently-started
+// histories: set the same workspace ID on both sides and they will sync
+// (disjoint histories still land on a conflict branch, never overwriting).
+func (r *Repo) SetWorkspace(ws string) error {
+	ws = strings.TrimSpace(ws)
+	if ws != "" {
+		if err := ValidateWorkspaceID(ws); err != nil {
+			return err
+		}
+	}
+	r.Config.Workspace = ws
+	return nil
+}

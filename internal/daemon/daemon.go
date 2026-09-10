@@ -19,8 +19,8 @@ import (
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
 	"github.com/lrm-project/lrm/internal/staging"
-	"github.com/lrm-project/lrm/internal/stun"
 	"github.com/lrm-project/lrm/internal/store"
+	"github.com/lrm-project/lrm/internal/stun"
 	lrmsync "github.com/lrm-project/lrm/internal/sync"
 	"github.com/lrm-project/lrm/internal/transport"
 	"github.com/lrm-project/lrm/internal/upnp"
@@ -58,13 +58,14 @@ type Daemon struct {
 	// Capacity 1: bursts coalesce into a single round.
 	dialNow chan struct{}
 
-	upnpGW         *upnp.Gateway
-	upnpMapped     bool
-	natGW          net.IP
-	natMappedPort  uint16
-	onSync         func(*lrmsync.SyncResult)
-	onChange       func(int)
-	shutdownOnce   sync.Once
+	mapMu         sync.Mutex // guards the mapping fields below
+	upnpGW        *upnp.Gateway
+	upnpMapped    bool
+	natGW         net.IP
+	natMappedPort uint16
+	onSync        func(*lrmsync.SyncResult)
+	onChange      func(int)
+	shutdownOnce  sync.Once
 }
 
 type peerConn struct {
@@ -129,10 +130,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
 		d.cfg.Port = addr.Port
 	}
-	// 2. WAN mapping (best-effort, non-blocking fallback).
-	d.tryMapPorts()
-	// 3. LAN announcements.
-	d.adv = mdns.StartAdvertiser(d.repo.Identity.HexID(), d.repo.Identity.HexPub(), d.repo.Config.User, d.cfg.Port, 2*time.Second)
+	// 2. LAN announcements.
+	d.adv = mdns.StartAdvertiser(d.repo.Identity.HexID(), d.repo.Identity.HexPub(), d.repo.Config.Workspace, d.repo.Config.User, d.cfg.Port, 2*time.Second)
 
 	var wg sync.WaitGroup
 	wg.Add(5)
@@ -141,6 +140,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go func() { defer wg.Done(); d.peerLoop(ctx) }()
 	go func() { defer wg.Done(); d.watchLoop(ctx) }()
 	go func() { defer wg.Done(); d.refreshMappingsLoop(ctx) }()
+
+	// 3. WAN mapping — AFTER the loops are live: NAT discovery can block
+	// for ~15s on networks without an IGD (UPnP SSDP timeout + NAT-PMP
+	// retransmissions), and that must never delay accepting peers.
+	d.tryMapPorts()
 
 	<-ctx.Done()
 	d.Shutdown()
@@ -255,6 +259,12 @@ func (d *Daemon) dialKnownPeers(ctx context.Context) {
 		p := val.(mdns.Peer)
 		if time.Since(p.SeenAt) > knownPeerTTL {
 			d.known.Delete(key)
+			return true
+		}
+		// Workspace scoping: never dial peers that announce a different
+		// workspace. Legacy peers (no ws announced) are still dialed and
+		// gated later by the sync handshake.
+		if p.WS != "" && d.repo.Config.Workspace != "" && p.WS != d.repo.Config.Workspace {
 			return true
 		}
 		if _, ok := d.peers.Load(p.PeerHex); ok {
@@ -375,6 +385,8 @@ func (d *Daemon) scanAndCommit() {
 // --- WAN mapping (UPnP → NAT-PMP → manual fallback) ---
 
 func (d *Daemon) tryMapPorts() {
+	d.mapMu.Lock()
+	defer d.mapMu.Unlock()
 	internal := localIPv4()
 	desc := "LRM P2P :" + d.repo.Config.User
 	// Step A: UPnP.
@@ -412,6 +424,8 @@ func (d *Daemon) refreshMappingsLoop(ctx context.Context) {
 }
 
 func (d *Daemon) unmapPorts() {
+	d.mapMu.Lock()
+	defer d.mapMu.Unlock()
 	if d.upnpMapped && d.upnpGW != nil {
 		_ = d.upnpGW.DeletePortMapping(d.cfg.Port, "TCP")
 		d.upnpMapped = false
@@ -424,6 +438,8 @@ func (d *Daemon) unmapPorts() {
 
 // PublicIP returns the WAN address (UPnP → STUN pool).
 func (d *Daemon) PublicIP() net.IP {
+	d.mapMu.Lock()
+	defer d.mapMu.Unlock()
 	if d.upnpMapped && d.upnpGW != nil {
 		if ip, err := d.upnpGW.ExternalIP(); err == nil {
 			return ip
@@ -437,6 +453,8 @@ func (d *Daemon) PublicIP() net.IP {
 
 // ExternalPort returns the mapped WAN port (or listen port if unmapped).
 func (d *Daemon) ExternalPort() uint16 {
+	d.mapMu.Lock()
+	defer d.mapMu.Unlock()
 	if d.natMappedPort != 0 {
 		return d.natMappedPort
 	}

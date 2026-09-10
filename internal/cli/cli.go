@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -980,22 +981,43 @@ func cmdPeers(args []string) error {
 	}
 	// Dedupe self if in a repo.
 	self := ""
+	localWS := ""
 	if r, err := openRepo(); err == nil {
 		self = r.Identity.HexID()
+		localWS = r.Config.Workspace
 		_ = r.Close()
 	}
+	// Tag peers with their workspace so foreign projects on shared Wi-Fi
+	// are visible at a glance.
 	shown := 0
 	for _, p := range peers {
 		if p.PeerHex == self {
 			continue
 		}
-		fmt.Printf("  %-8s %-16s %s (%s)\n", p.User, p.Addr(), p.PeerHex[:12], p.Source)
+		tag := "-"
+		switch {
+		case p.WS == "":
+			tag = "legacy"
+		case p.WS == localWS:
+			tag = "same"
+		default:
+			tag = "other"
+		}
+		fmt.Printf("  %-8s %-16s ws:%-8s %s (%s)\n", p.User, p.Addr(), wsTag(p.WS), tag, p.Source)
 		shown++
 	}
 	if shown == 0 {
 		fmt.Println("no peers found (are teammates running `lrm daemon` on this Wi-Fi?)")
 	}
 	return nil
+}
+
+// wsTag shortens a workspace id for display.
+func wsTag(ws string) string {
+	if len(ws) >= 8 {
+		return ws[:8]
+	}
+	return ws
 }
 
 // cmdShare implements the Automated Port Forwarding Pipeline:
@@ -1110,7 +1132,7 @@ func cmdShare(args []string) error {
 		fmt.Printf("OK (%s via STUN)\n", ip.String())
 	}
 	// Generate key.
-	key := portkey.Generate(r.Identity.Pub, publicIP, mappedPort)
+	key := portkey.Generate(r.Identity.Pub, publicIP, mappedPort, wsBytes(r.Config.Workspace))
 	fmt.Println()
 	fmt.Println("Share this Port Key with your teammate (it expires with the lease):")
 	fmt.Println()
@@ -1152,6 +1174,18 @@ func isListening(port int) bool {
 	return true
 }
 
+// wsBytes decodes a hex workspace ID ("" → nil, for v1 keys).
+func wsBytes(wsHex string) []byte {
+	if wsHex == "" {
+		return nil
+	}
+	b, err := hex.DecodeString(wsHex)
+	if err != nil || len(b) != 16 {
+		return nil
+	}
+	return b
+}
+
 func cmdJoin(args []string) error {
 	initFlag, args := hasFlag(args, "--init")
 	if len(args) == 0 {
@@ -1167,7 +1201,7 @@ func cmdJoin(args []string) error {
 		cwd, _ := os.Getwd()
 		base := filepath.Base(cwd)
 		if _, err := os.Stat(filepath.Join(cwd, ".lrm")); err != nil {
-			r, err = store.Init(cwd, base, store.DefaultPort)
+			r, err = store.InitWithWorkspace(cwd, base, store.DefaultPort, key.WorkspaceHex())
 			if err != nil {
 				return err
 			}
@@ -1185,6 +1219,18 @@ func cmdJoin(args []string) error {
 		}
 	}
 	defer r.Close()
+	// Workspace scoping: v2 keys carry the workspace they were minted for.
+	if keyWS := key.WorkspaceHex(); keyWS != "" {
+		if r.Config.Workspace != "" && r.Config.Workspace != keyWS {
+			return fmt.Errorf("this key belongs to a different workspace (%.8s… ≠ %.8s…) — clone it into a fresh directory instead",
+				r.Config.Workspace, keyWS)
+		}
+		if r.Config.Workspace == "" {
+			if err := r.SetWorkspace(keyWS); err == nil {
+				_ = r.SaveConfig()
+			}
+		}
+	}
 	fmt.Printf("dialing %s (peer %x)...\n", key.Addr(), key.PeerID[:4])
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

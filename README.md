@@ -25,7 +25,7 @@ echo "hello LRM" > hello.txt
 lrm commit -m "first commit"
 
 # Same Wi-Fi: Bob finds Alice automatically
-lrm peers                    # → alice @ 192.168.1.5:8443
+lrm peers                    # → alice @ 192.168.1.5:8443  ws:1a2b3c4d (same)
 lrm daemon                   # background real-time sync (both sides)
 
 # Different Wi-Fi / across the globe: Alice shares a Port Key
@@ -47,6 +47,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | File chunking 4KB–1MB + manifests (BitTorrent/IPFS model) | ✅ |
 | | Line diffs / unified patches, binary detection | ✅ |
 | **2 — P2P mesh** | Zero-config LAN discovery (mDNS `_lrm._tcp` + UDP broadcast) | ✅ |
+| | Workspace identity — mesh scoping: strangers on shared Wi-Fi never sync (legacy repos derive it from genesis; v2 Port Keys carry it) | ✅ |
 | | Authenticated encryption (X25519 + Ed25519 + AES-GCM, MITM-drop) | ✅ |
 | | Streaming multiplexer (N concurrent streams / 1 connection) | ✅ |
 | | UPnP auto port mapping (SSDP → SOAP) | ✅ |
@@ -88,7 +89,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm merge <BRANCH\|HASH>` | fast-forward or 3-way merge |
 | `lrm cat-file <HASH>` | print a CAS object |
 | `lrm replog [--last N]` | replication audit trail |
-| `lrm peers [--timeout S]` | discover LAN developers |
+| `lrm peers [--timeout S]` | discover LAN developers (workspace-tagged) |
 | `lrm share [--port P] [--no-upnp] [--no-natpmp]` | map router port, print Port Key |
 | `lrm join <PORTKEY> [--init]` | verified dial + full history sync |
 | `lrm sync [--peer H:P]` | sync with LAN peers (or one peer) |
@@ -105,7 +106,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm blame <FILE> [REF]` | per-line authorship (first-parent walk) |
 | `lrm cherry-pick <REF>` | replay a commit onto this branch (file-level 3-way) |
 | `lrm grep [-i] [-l] <PAT> [REF]` | literal-substring search in workdir or history |
-| `lrm config [--list] [user\|port [V]]` | view / change identity settings |
+| `lrm config [--list] [user\|port\|workspace [V]]` | view / change identity settings (workspace = mesh scoping escape hatch) |
 | `lrm clean [-n] [-f] [-d] [-x]` | list / delete untracked files (dry run by default; `-x` includes ignored) |
 | `lrm describe [REF]` | nearest tag (`v1-3-g<short>`) |
 | `lrm commit --amend [-m MSG]` | fold workdir state into the tip commit |

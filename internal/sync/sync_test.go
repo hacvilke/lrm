@@ -7,16 +7,21 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/store"
 )
 
+// testWS is the shared workspace ID: repos created by mkRepo are peers of
+// one workspace. Stranger-repo scenarios pass their own workspace ID.
+const testWS = "11111111111111111111111111111111"
+
 func mkRepo(t *testing.T, user string) *store.Repo {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "proj")
-	r, err := store.Init(dir, user, 0)
+	r, err := store.InitWithWorkspace(dir, user, 0, testWS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,5 +272,131 @@ func TestPushLegCompleteness(t *testing.T) {
 		if !r.CAS.Exists(th) {
 			t.Fatalf("missing tree %s for pushed history", c.Tree[:12])
 		}
+	}
+}
+
+// TestSyncWorkspaceMismatchRefused is the stranger-on-the-LAN scenario: two
+// repos in different workspaces must NOT sync. Before workspace gating, the
+// stranger's tip was fetched and parked as a HEAD-peer-* conflict ref.
+func TestSyncWorkspaceMismatchRefused(t *testing.T) {
+	a := mkRepo(t, "alice") // workspace testWS
+	commitFile(t, a, "secret.txt", "alice's project\n", "alice first")
+
+	// bob lives in a different workspace entirely.
+	dir := filepath.Join(t.TempDir(), "bob")
+	b, err := store.InitWithWorkspace(dir, "bob", 0, "22222222222222222222222222222222")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	commitFile(t, b, "other.txt", "bob's unrelated project\n", "bob first")
+
+	tipA, _, _ := a.HeadCommit()
+	brsBeforeB, _ := b.ListBranches()
+
+	pa, pb := net.Pipe()
+	sessA := mux.NewSession(pa, false)
+	sessB := mux.NewSession(pb, true)
+	defer sessA.Close()
+	defer sessB.Close()
+
+	var wg stdsync.WaitGroup
+	wg.Add(2)
+	var resA, resB *SyncResult
+	var errA, errB error
+	go func() {
+		defer wg.Done()
+		resA, errA = New(a).SyncWithSession(sessA, false, "")
+	}()
+	go func() {
+		defer wg.Done()
+		resB, errB = New(b).SyncWithSession(sessB, true, "")
+	}()
+	wg.Wait()
+
+	// The dialer is told the sync was refused.
+	if errB == nil || !strings.Contains(errB.Error(), "workspace mismatch") {
+		t.Fatalf("dialer should be refused with workspace mismatch, got err=%v", errB)
+	}
+	_ = resB
+	// The responder reports it without failing the session.
+	if errA != nil {
+		t.Fatalf("responder: %v", errA)
+	}
+	if resA == nil || !strings.Contains(resA.Message, "workspace mismatch") {
+		t.Fatalf("responder should report mismatch, got %+v", resA)
+	}
+	// No objects crossed: bob must not know alice's tip…
+	if b.DAG.Has(tipA) {
+		t.Fatal("foreign workspace commit leaked into bob's DAG")
+	}
+	// …and no HEAD-peer-* conflict branch was created.
+	brsAfterB, _ := b.ListBranches()
+	if len(brsAfterB) != len(brsBeforeB) {
+		t.Fatalf("branch set changed on refusal: before=%v after=%v", brsBeforeB, brsAfterB)
+	}
+	for _, br := range brsAfterB {
+		if strings.HasPrefix(br, "HEAD-peer-") {
+			t.Fatalf("conflict branch created on refusal: %s", br)
+		}
+	}
+}
+
+// TestSyncWorkspaceAdoption is the v1-Port-Key join flow: an untethered
+// repo (no workspace yet) takes the sharer's workspace on first sync.
+func TestSyncWorkspaceAdoption(t *testing.T) {
+	a := mkRepo(t, "alice") // workspace testWS
+	commitFile(t, a, "hello.txt", "hello from alice\n", "alice first")
+
+	// bob: fresh repo created by a v1 join (no workspace carried in the key).
+	dir := filepath.Join(t.TempDir(), "bob")
+	b, err := store.InitWithWorkspace(dir, "bob", 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pa, pb := net.Pipe()
+	sessA := mux.NewSession(pa, false)
+	sessB := mux.NewSession(pb, true)
+
+	var wg stdsync.WaitGroup
+	wg.Add(2)
+	var resA, resB *SyncResult
+	var errA, errB error
+	go func() {
+		defer wg.Done()
+		resA, errA = New(a).SyncWithSession(sessA, false, "")
+	}()
+	go func() {
+		defer wg.Done()
+		resB, errB = New(b).SyncWithSession(sessB, true, "")
+	}()
+	wg.Wait()
+	sessA.Close()
+	sessB.Close()
+	_ = resA
+	if errA != nil {
+		t.Fatalf("responder: %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("dialer: %v", errB)
+	}
+	if resB == nil || resB.Fetched == 0 {
+		t.Fatal("bob should have fetched alice's history")
+	}
+	if b.Config.Workspace != testWS {
+		t.Fatalf("bob should have adopted workspace %s, has %q", testWS, b.Config.Workspace)
+	}
+	// The adoption must be persisted, not just in-memory.
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.Config.Workspace != testWS {
+		t.Fatalf("adopted workspace not persisted: %q", reopened.Config.Workspace)
 	}
 }

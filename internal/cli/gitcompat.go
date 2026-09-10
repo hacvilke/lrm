@@ -124,15 +124,17 @@ func cmdClone(args []string) error {
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return err
 	}
-	r, err := store.Init(abs, filepath.Base(abs), store.DefaultPort)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
 	key, err := portkey.Decode(keyStr)
 	if err != nil {
 		return fmt.Errorf("bad port key: %w", err)
 	}
+	// v2 keys carry the workspace: the clone is born inside it, so the
+	// first sync passes the workspace gate instead of being refused.
+	r, err := store.InitWithWorkspace(abs, filepath.Base(abs), store.DefaultPort, key.WorkspaceHex())
+	if err != nil {
+		return err
+	}
+	defer r.Close()
 	fmt.Printf("cloning from %s (peer %x) into %s...\n", key.Addr(), key.PeerID[:4], abs)
 	res, err := dialAndSync(r, key.Addr(), key.PeerID)
 	if err != nil {
@@ -674,7 +676,7 @@ func cmdConfig(args []string) error {
 	}
 	defer r.Close()
 	if list || len(args) == 0 {
-		fmt.Printf("user=%s\nport=%d\npeer=%s\n", r.Config.User, r.Config.Port, r.Identity.ShortID())
+		fmt.Printf("user=%s\nport=%d\npeer=%s\nworkspace=%s\n", r.Config.User, r.Config.Port, r.Identity.ShortID(), r.Config.Workspace)
 		return nil
 	}
 	key := args[0]
@@ -686,13 +688,15 @@ func cmdConfig(args []string) error {
 			fmt.Println(r.Config.Port)
 		case "peer":
 			fmt.Println(r.Identity.HexID())
+		case "workspace":
+			fmt.Println(r.Config.Workspace)
 		default:
-			return fmt.Errorf("unknown key %q (want user|port|peer)", key)
+			return fmt.Errorf("unknown key %q (want user|port|peer|workspace)", key)
 		}
 		return nil
 	}
 	if len(args) != 2 {
-		return fmt.Errorf("usage: lrm config [--list] [user|port [value]]")
+		return fmt.Errorf("usage: lrm config [--list] [user|port|workspace [value]]")
 	}
 	switch key {
 	case "user":
@@ -707,10 +711,14 @@ func cmdConfig(args []string) error {
 		if err := r.SetPort(port); err != nil {
 			return err
 		}
+	case "workspace":
+		if err := r.SetWorkspace(args[1]); err != nil {
+			return err
+		}
 	case "peer":
 		return fmt.Errorf("peer id is immutable (it is your cryptographic identity)")
 	default:
-		return fmt.Errorf("unknown key %q (want user|port)", key)
+		return fmt.Errorf("unknown key %q (want user|port|workspace)", key)
 	}
 	if err := r.SaveConfig(); err != nil {
 		return err

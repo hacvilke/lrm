@@ -11,10 +11,14 @@
 package store
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,10 +36,34 @@ type Config struct {
 	User        string `json:"user"`
 	Port        int    `json:"port"`
 	DefaultHead string `json:"default_head"`
+	// Workspace is the mesh scoping ID (16-byte hex): two nodes only sync
+	// when their workspace IDs match. Set at init/join/clone time; legacy
+	// repos derive it deterministically from their genesis commit.
+	Workspace string `json:"workspace,omitempty"`
 }
 
 // DefaultPort is the default LRM WAN/LAN listen port.
 const DefaultPort = 8443
+
+// GenerateWorkspaceID mints a fresh random workspace ID (16 bytes, hex).
+func GenerateWorkspaceID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate workspace id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// ValidateWorkspaceID checks the hex form (32 chars, 16 bytes).
+func ValidateWorkspaceID(ws string) error {
+	if len(ws) != 32 {
+		return fmt.Errorf("workspace id must be 32 hex chars, got %d", len(ws))
+	}
+	if _, err := hex.DecodeString(ws); err != nil {
+		return fmt.Errorf("workspace id must be hex: %w", err)
+	}
+	return nil
+}
 
 // Repo is an opened LRM repository.
 type Repo struct {
@@ -49,14 +77,32 @@ type Repo struct {
 	Replog   *replog.Log
 }
 
-// Init creates a new LRM repo at root (root must exist or be created).
+// Init creates a new LRM repo at root (root must exist or be created),
+// with a freshly generated workspace ID.
 func Init(root, user string, port int) (*Repo, error) {
+	ws, err := GenerateWorkspaceID()
+	if err != nil {
+		return nil, err
+	}
+	return InitWithWorkspace(root, user, port, ws)
+}
+
+// InitWithWorkspace creates a new LRM repo bound to a specific workspace ID
+// (hex). An empty wsHex creates a repo with no workspace yet — used by the
+// v1-Port-Key join flow, where the workspace is adopted from the remote's
+// hello on first sync.
+func InitWithWorkspace(root, user string, port int, wsHex string) (*Repo, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
 	lrmDir := filepath.Join(root, ".lrm")
 	if _, err := os.Stat(lrmDir); err == nil {
 		return nil, fmt.Errorf("%s is already an LRM repo", root)
+	}
+	if wsHex != "" {
+		if err := ValidateWorkspaceID(wsHex); err != nil {
+			return nil, err
+		}
 	}
 	for _, d := range []string{
 		lrmDir,
@@ -75,7 +121,7 @@ func Init(root, user string, port int) (*Repo, error) {
 	if port == 0 {
 		port = DefaultPort
 	}
-	cfg := Config{Version: 1, User: user, Port: port, DefaultHead: "main"}
+	cfg := Config{Version: 1, User: user, Port: port, DefaultHead: "main", Workspace: wsHex}
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
 	if err := os.WriteFile(filepath.Join(lrmDir, "config.json"), raw, 0o644); err != nil {
 		return nil, err
@@ -121,11 +167,79 @@ func Open(startDir string, _ ...any) (*Repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{
+	r := &Repo{
 		Root: root, LrmDir: lrmDir, Config: cfg,
 		Identity: id, CAS: casStore, DAG: dag.New(casStore),
 		Index: idx, Replog: rl,
-	}, nil
+	}
+	// Legacy repo (created before workspace IDs existed): derive the
+	// workspace deterministically from the genesis commit so peers that
+	// already share history keep syncing, while strangers (different
+	// genesis) are refused. Persisted best-effort — derived value is used
+	// in memory even if the write fails.
+	if r.Config.Workspace == "" {
+		if ws, err := r.deriveWorkspace(); err == nil && ws != "" {
+			r.Config.Workspace = ws
+			_ = r.SaveConfig()
+		}
+	}
+	return r, nil
+}
+
+// deriveWorkspace computes the workspace ID from the repo's DAG: all root
+// (parentless) commits are collected and the lexicographically smallest
+// root hash is fingerprinted. Repos sharing any history converge on the
+// same ID; unrelated histories get different IDs.
+func (r *Repo) deriveWorkspace() (string, error) {
+	branches, err := r.ListBranches()
+	if err != nil {
+		return "", err
+	}
+	seen := map[cas.Hash]bool{}
+	queue := make([]cas.Hash, 0, len(branches))
+	for _, b := range branches {
+		hexTip, err := r.GetRef(b)
+		if err != nil || hexTip == "" {
+			continue
+		}
+		h, err := cas.ParseHex(hexTip)
+		if err != nil {
+			continue
+		}
+		if !seen[h] {
+			seen[h] = true
+			queue = append(queue, h)
+		}
+	}
+	var roots []string
+	for len(queue) > 0 {
+		h := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		c, err := r.DAG.Get(h)
+		if err != nil {
+			continue
+		}
+		parents, err := r.DAG.Parents(c)
+		if err != nil {
+			continue
+		}
+		if len(parents) == 0 {
+			roots = append(roots, cas.Hex(h))
+			continue
+		}
+		for _, p := range parents {
+			if !seen[p] {
+				seen[p] = true
+				queue = append(queue, p)
+			}
+		}
+	}
+	if len(roots) == 0 {
+		return "", nil // no commits yet
+	}
+	sort.Strings(roots)
+	sum := sha256.Sum256(append([]byte("lrm-ws-v1"), []byte(roots[0])...))
+	return hex.EncodeToString(sum[:16]), nil
 }
 
 // Close releases repo resources.

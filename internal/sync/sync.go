@@ -36,6 +36,7 @@ type Msg struct {
 	Peer    string            `json:"peer,omitempty"`
 	Branch  string            `json:"branch,omitempty"`
 	Heads   []string          `json:"heads,omitempty"`
+	WS      string            `json:"ws,omitempty"` // workspace id (mesh scoping)
 	Commits []json.RawMessage `json:"commits,omitempty"`
 	Want    []string          `json:"want,omitempty"`
 	Objects []string          `json:"objects,omitempty"`
@@ -53,13 +54,13 @@ func New(r *store.Repo) *Engine { return &Engine{Repo: r} }
 
 // SyncResult summarizes a sync session.
 type SyncResult struct {
-	RemotePeer    string
-	Fetched       int
-	Pushed        int
-	MergedCommit  string
+	RemotePeer     string
+	Fetched        int
+	Pushed         int
+	MergedCommit   string
 	ConflictBranch string
-	FastForwarded bool
-	Message       string
+	FastForwarded  bool
+	Message        string
 }
 
 // SyncWithSession runs a full bidirectional sync over an established mux
@@ -81,7 +82,13 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		if err != nil {
 			return nil, err
 		}
+		if hello.Type == "error" {
+			return res, fmt.Errorf("remote refused sync: %s", hello.Error)
+		}
 		res.RemotePeer = hello.Peer
+		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
+			return res, err
+		}
 		if err := e.serveResponder(ctl, sess, hello, res); err != nil {
 			return res, err
 		}
@@ -95,6 +102,9 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 			return nil, err
 		}
 		res.RemotePeer = hello.Peer
+		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
+			return res, err
+		}
 		if err := e.writeHello(ctl); err != nil {
 			return nil, err
 		}
@@ -104,6 +114,37 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 	}
 	_ = remoteBranch
 	return res, nil
+}
+
+// workspaceGate enforces mesh scoping: a sync only proceeds when both sides
+// belong to the same workspace. This is what keeps strangers on shared
+// Wi-Fi from cross-pollinating each other's repos — before it existed, any
+// two LRM daemons on the same LAN would sync, and disjoint histories landed
+// as HEAD-peer-* conflict refs in both object stores.
+//
+// Rules:
+//   - both non-empty and different  → refuse (error msg, zero objects moved)
+//   - local empty, remote non-empty → adopt the remote workspace (the
+//     v1-Port-Key join flow: an untethered repo takes the sharer's identity)
+//   - anything else                 → allowed (legacy peers, new join)
+func (e *Engine) workspaceGate(ctl *mux.Stream, hello Msg, res *SyncResult) (bool, error) {
+	local := e.Repo.Config.Workspace
+	remote := hello.WS
+	if remote != "" && local == "" {
+		if err := e.Repo.SetWorkspace(remote); err == nil {
+			if err := e.Repo.SaveConfig(); err != nil {
+				return false, fmt.Errorf("persist adopted workspace: %w", err)
+			}
+			local = remote
+		}
+	}
+	if local != "" && remote != "" && local != remote {
+		res.Message = fmt.Sprintf("workspace mismatch (%s ≠ %s) — sync refused, no objects exchanged",
+			shortHexStr(local), shortHexStr(remote))
+		_ = writeMsg(ctl, Msg{Type: "error", Error: "workspace mismatch: peer belongs to a different workspace"})
+		return false, nil
+	}
+	return true, nil
 }
 
 // writeHello advertises our branch heads.
@@ -118,6 +159,7 @@ func (e *Engine) writeHello(w io.Writer) error {
 	_ = branches
 	return writeMsg(w, Msg{
 		Type: "hello", Peer: e.Repo.Identity.HexID(), Branch: br, Heads: heads,
+		WS:    e.Repo.Config.Workspace,
 		Extra: map[string]string{"user": e.Repo.Config.User},
 	})
 }

@@ -60,7 +60,7 @@ u32 streamID || u8 flags || u32 payloadLen || payload[..]
 
 | Type | Direction | Fields | Meaning |
 |------|-----------|--------|---------|
-| `hello` | both | `peer, branch, heads[], extra{user}` | advertise identity + branch tips |
+| `hello` | both | `peer, branch, heads[], ws, extra{user}` | advertise identity + branch tips + workspace |
 | `want` | → peer | `want[commitHex…]` | request commits by hash |
 | `have` | → peer | `commits[commitJSON…]` | commit bodies (small, inline) |
 | `want-objects` | → peer | `objects[hex…], extra{stream}` | request blobs/trees/chunks; data follows on a fresh mux stream |
@@ -68,6 +68,25 @@ u32 streamID || u8 flags || u32 payloadLen || payload[..]
 | `push-tip` | → peer | `peer, heads[tip]` | "integrate this tip if you can" |
 | `done` | → peer | — | fetch complete, close session |
 | `error` | → peer | `error` | fatal request error |
+
+### Workspace gate (mesh scoping)
+
+`ws` is the 16-byte-hex workspace ID (config `workspace`):
+
+- both sides non-empty and **different** → the sync is refused with an
+  `error` message before any object moves (strangers on shared Wi-Fi
+  never see each other's data);
+- local empty, remote non-empty → the local repo **adopts** the remote
+  workspace and persists it (the v1-Port-Key join flow);
+- anything else → allowed.
+
+`lrm init` mints a fresh workspace ID. Repos created before this field
+existed derive it deterministically from their genesis commit
+(`SHA-256("lrm-ws-v1" || min-root)[:16]`), so peers that already share
+history keep syncing after upgrading. `lrm config workspace <hex>` is the
+explicit escape hatch for deliberately merging two independently-started
+histories (disjoint histories still land on conflict branches — nothing is
+ever overwritten).
 
 ### Object bulk stream
 
@@ -103,21 +122,29 @@ Let `base = LCA(localTip, remoteTip)`:
 ### LAN broadcast (primary, `internal/mdns`)
 
 - UDP broadcast to `255.255.255.255:8413`, JSON every 2s:
-  `{"v":1,"peer":hex,"pub":hex,"user":str,"port":int}`.
-- Listeners bind `:8413` and collect unique peers.
+  `{"v":1,"peer":hex,"pub":hex,"user":str,"port":int,"ws":hex}`.
+- Listeners bind `:8413` and collect unique peers. The daemon skips
+  dialing peers that announce a foreign `ws` (legacy peers without one are
+  still dialed and gated by the handshake).
 
 ### mDNS (secondary)
 
 - PTR query for `_lrm._tcp.local.` to `224.0.0.251:5353`.
-- LRM TXT records: `peer=<hex> port=<n> user=<s> pub=<hex>`.
+- LRM TXT records: `peer=<hex> port=<n> user=<s> pub=<hex> ws=<hex>`.
 
 ## 5. Port Key (WAN dial strings, `internal/portkey`)
 
 Compact (preferred — carries the full pubkey for MITM-proof dialing):
 
 ```
-"lrm1_" || base64url_nopad( u8 version || u8 ipLen || ip[4|16] || u16 port || 32B ed25519 pubkey )
+v1: "lrm1_" || base64url_nopad( u8 version=1 || u8 ipLen || ip[4|16] || u16 port || 32B ed25519 pubkey )
+v2: "lrm1_" || base64url_nopad( u8 version=2 || u8 ipLen || ip[4|16] || u16 port || 32B ed25519 pubkey || 16B workspace ID )
 ```
+
+v2 keys (emitted by `lrm share`) are scoped to a workspace: `join`/`clone`
+creates the repo inside it, so the first sync passes the workspace gate.
+v1 keys still decode (no workspace — the repo adopts it from the remote
+hello).
 
 Human (fingerprint only — TOFU warning on use):
 

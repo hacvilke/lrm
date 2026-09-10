@@ -21,8 +21,12 @@ import (
 	"strings"
 )
 
-// Version is the Port Key protocol version.
-const Version uint8 = 1
+// Version is the current Port Key protocol version (keys carrying a
+// workspace ID). v1 keys (no workspace) remain decodable for back-compat.
+const Version uint8 = 2
+
+// Version1 is the legacy workspace-less key version.
+const Version1 uint8 = 1
 
 // Prefix is the compact encoding prefix.
 const Prefix = "lrm1_"
@@ -34,6 +38,7 @@ type LrmPortKey struct {
 	Port       uint16
 	PeerID     []byte // SHA-256 fingerprint of PubKey (32 bytes)
 	PubKey     ed25519.PublicKey
+	Workspace  []byte // 16-byte workspace ID (v2 keys only; nil = v1)
 }
 
 // Fingerprint returns SHA-256(pubkey).
@@ -42,9 +47,26 @@ func Fingerprint(pub ed25519.PublicKey) []byte {
 	return sum[:]
 }
 
-// Generate builds a key for local identity at ip:port.
-func Generate(pub ed25519.PublicKey, ip net.IP, port uint16) *LrmPortKey {
-	return &LrmPortKey{Version: Version, ExternalIP: ip, Port: port, PeerID: Fingerprint(pub), PubKey: pub}
+// Generate builds a key for local identity at ip:port. A non-empty ws
+// (16 bytes) produces a v2 key scoped to that workspace; nil produces a
+// legacy v1 key.
+func Generate(pub ed25519.PublicKey, ip net.IP, port uint16, ws []byte) *LrmPortKey {
+	ver := Version1
+	var wsCopy []byte
+	if len(ws) == 16 {
+		ver = Version
+		wsCopy = make([]byte, 16)
+		copy(wsCopy, ws)
+	}
+	return &LrmPortKey{Version: ver, ExternalIP: ip, Port: port, PeerID: Fingerprint(pub), PubKey: pub, Workspace: wsCopy}
+}
+
+// WorkspaceHex returns the workspace ID as hex ("" for v1 keys).
+func (k *LrmPortKey) WorkspaceHex() string {
+	if len(k.Workspace) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%x", k.Workspace)
 }
 
 // Encode renders the compact shareable string.
@@ -57,8 +79,12 @@ func (k *LrmPortKey) Encode() string {
 			ipLen = 0
 		}
 	}
-	raw := make([]byte, 0, 1+1+16+2+32)
-	raw = append(raw, k.Version)
+	ver := k.Version
+	if len(k.Workspace) != 16 {
+		ver = Version1
+	}
+	raw := make([]byte, 0, 1+1+16+2+32+16)
+	raw = append(raw, ver)
 	raw = append(raw, byte(ipLen))
 	if ipLen == 4 {
 		raw = append(raw, ip.To4()...)
@@ -67,6 +93,9 @@ func (k *LrmPortKey) Encode() string {
 	}
 	raw = append(raw, byte(k.Port>>8), byte(k.Port))
 	raw = append(raw, k.PubKey...)
+	if ver == Version {
+		raw = append(raw, k.Workspace...)
+	}
 	return Prefix + base64.RawURLEncoding.EncodeToString(raw)
 }
 
@@ -106,7 +135,7 @@ func decodeCompact(s string) (*LrmPortKey, error) {
 		return nil, fmt.Errorf("port key too short (%d bytes)", len(raw))
 	}
 	ver := raw[0]
-	if ver != Version {
+	if ver != Version && ver != Version1 {
 		return nil, fmt.Errorf("unsupported port key version %d", ver)
 	}
 	ipLen := int(raw[1])
@@ -124,7 +153,16 @@ func decodeCompact(s string) (*LrmPortKey, error) {
 	off += 2
 	pub := make(ed25519.PublicKey, 32)
 	copy(pub, raw[off:off+32])
-	return &LrmPortKey{Version: ver, ExternalIP: ip, Port: port, PeerID: Fingerprint(pub), PubKey: pub}, nil
+	off += 32
+	var ws []byte
+	if ver == Version {
+		if len(raw) < off+16 {
+			return nil, fmt.Errorf("truncated port key (missing workspace id)")
+		}
+		ws = make([]byte, 16)
+		copy(ws, raw[off:off+16])
+	}
+	return &LrmPortKey{Version: ver, ExternalIP: ip, Port: port, PeerID: Fingerprint(pub), PubKey: pub, Workspace: ws}, nil
 }
 
 // decodeHuman parses: lrm_key: [IP]:[Port]@[PeerID-hex]

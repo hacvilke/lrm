@@ -6,6 +6,7 @@ package lr
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -356,7 +357,7 @@ func (ev *Evaluator) installStdlib() {
 			ev.Rec.Net(fmt.Sprintf("share: STUN failed: %v", shortErr(err)))
 			return errMap("could not determine public IP (STUN failed)"), nil
 		}
-		key := portkey.Generate(r.Identity.Pub, publicIP, mappedPort)
+		key := portkey.Generate(r.Identity.Pub, publicIP, mappedPort, wsBytesFromHex(r.Config.Workspace))
 		listening := probeListen(port)
 		ev.Rec.Net(fmt.Sprintf("share: key for %s (mapped=%v listening=%v)", key.Addr(), mapped, listening))
 		return okMap("key", key.Encode(), "human", key.Human(),
@@ -553,6 +554,18 @@ func probeListen(port int) bool {
 	}
 	_ = conn.Close()
 	return true
+}
+
+// wsBytesFromHex decodes a hex workspace ID ("" → nil, for v1 keys).
+func wsBytesFromHex(wsHex string) []byte {
+	if wsHex == "" {
+		return nil
+	}
+	b, err := hex.DecodeString(wsHex)
+	if err != nil || len(b) != 16 {
+		return nil
+	}
+	return b
 }
 
 func shortErr(err error) string {
