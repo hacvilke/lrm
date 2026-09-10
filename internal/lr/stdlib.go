@@ -30,6 +30,31 @@ import (
 
 // installStdlib registers file, network and LRM builtins. Files are jailed
 // to the evaluator's WorkDir; LRM builtins open the repo containing WorkDir.
+
+// capMS caps a requested millisecond timeout to the run deadline.
+// Returns 0 when the deadline has already passed.
+func capMS(ev *Evaluator, ms int) int {
+	if left, ok := ev.remaining(); ok {
+		leftMS := int(left.Milliseconds())
+		if leftMS <= 0 {
+			return 0
+		}
+		if ms <= 0 || ms > leftMS {
+			return leftMS
+		}
+	}
+	return ms
+}
+
+// deadlineCtx returns a context bounded by the run deadline when one is
+// set and closer than d.
+func deadlineCtx(ev *Evaluator, d time.Duration) (context.Context, context.CancelFunc) {
+	if left, ok := ev.remaining(); ok && left < d {
+		return context.WithDeadline(context.Background(), ev.Deadline)
+	}
+	return context.WithTimeout(context.Background(), d)
+}
+
 func (ev *Evaluator) installStdlib() {
 	box, err := newSandbox(ev.WorkDir)
 	if err != nil {
@@ -108,6 +133,10 @@ func (ev *Evaluator) installStdlib() {
 				timeout = int(n)
 			}
 		}
+		timeout = capMS(ev, timeout)
+		if timeout <= 0 {
+			return Null, &RuntimeError{Msg: "script timeout exceeded", Pos: pos}
+		}
 		addr := net.JoinHostPort(args[0].S, args[1].String())
 		t0 := time.Now()
 		conn, err := net.DialTimeout("tcp", addr, time.Duration(timeout)*time.Millisecond)
@@ -129,7 +158,9 @@ func (ev *Evaluator) installStdlib() {
 		}
 		host := args[0].S
 		t0 := time.Now()
-		ips, err := net.DefaultResolver.LookupHost(context.Background(), host)
+		rctx, rcancel := deadlineCtx(ev, 8*time.Second)
+		defer rcancel()
+		ips, err := net.DefaultResolver.LookupHost(rctx, host)
 		ms := time.Since(t0).Milliseconds()
 		if err != nil {
 			ev.Rec.Net(fmt.Sprintf("dns %s: FAIL %v (%dms)", host, shortErr(err), ms))
@@ -153,6 +184,10 @@ func (ev *Evaluator) installStdlib() {
 		}
 		url := args[0].S
 		t0 := time.Now()
+		timeout = capMS(ev, timeout)
+		if timeout <= 0 {
+			return Null, &RuntimeError{Msg: "script timeout exceeded", Pos: pos}
+		}
 		client := &http.Client{Timeout: time.Duration(timeout) * time.Millisecond}
 		resp, err := client.Get(url)
 		if err != nil {
@@ -174,7 +209,7 @@ func (ev *Evaluator) installStdlib() {
 			return Null, err
 		}
 		t0 := time.Now()
-		ip, err := stun.DiscoverPublicIP(nil, 8*time.Second)
+		ip, err := stun.DiscoverPublicIP(nil, time.Duration(capMS(ev, 8000))*time.Millisecond)
 		if err != nil || ip == nil {
 			ev.Rec.Net(fmt.Sprintf("stun: FAIL %v", shortErr(err)))
 			return errMap(fmt.Sprint("stun failed: ", shortErr(err))), nil
@@ -210,9 +245,13 @@ func (ev *Evaluator) installStdlib() {
 			c.M["path"] = Str(ch.Path)
 			changes = append(changes, c)
 		}
+		port := r.Config.Port
+		if port == 0 {
+			port = store.DefaultPort
+		}
 		return okMap("branch", br, "tip", tip,
 			"root", cas.Hex(res.RootHash)[:12],
-			"clean", res.Clean, "changes", changes), nil
+			"clean", res.Clean, "changes", changes, "port", port), nil
 	})
 	reg("lrm_commit", func(ev *Evaluator, args []Value, pos Pos) (Value, *RuntimeError) {
 		if err := arity("lrm_commit", args, 1, 1, pos); err != nil {
@@ -352,7 +391,7 @@ func (ev *Evaluator) installStdlib() {
 				}
 			}
 		}
-		publicIP, err := stun.DiscoverPublicIP(nil, 6*time.Second)
+		publicIP, err := stun.DiscoverPublicIP(nil, time.Duration(capMS(ev, 6000))*time.Millisecond)
 		if err != nil || publicIP == nil {
 			ev.Rec.Net(fmt.Sprintf("share: STUN failed: %v", shortErr(err)))
 			return errMap("could not determine public IP (STUN failed)"), nil
@@ -380,7 +419,7 @@ func (ev *Evaluator) installStdlib() {
 		}
 		defer r.Close()
 		ev.Rec.Net(fmt.Sprintf("join: dialing %s", key.Addr()))
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := deadlineCtx(ev, 15*time.Second)
 		defer cancel()
 		sconn, err := transport.Dial(ctx, key.Addr(), r.Identity, r.Identity.Pub, key.PeerID)
 		if err != nil {
@@ -416,9 +455,9 @@ func (ev *Evaluator) installStdlib() {
 		if peerAddr != "" {
 			targets = append(targets, peerAddr)
 		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-			peers, _ := mdns.Browse(ctx, 5*time.Second)
-			cancel()
+			bctx, bcancel := deadlineCtx(ev, 6*time.Second)
+			peers, _ := mdns.Browse(bctx, 5*time.Second)
+			bcancel()
 			self := r.Identity.HexID()
 			for i := range peers {
 				p := &peers[i]
@@ -433,8 +472,9 @@ func (ev *Evaluator) installStdlib() {
 		}
 		fetched, pushed := 0, 0
 		msgs := []string{}
+		synced := 0
 		for _, t := range targets {
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := deadlineCtx(ev, 20*time.Second)
 			sconn, err := transport.Dial(ctx, t, r.Identity, r.Identity.Pub, nil)
 			cancel()
 			if err != nil {
@@ -454,8 +494,13 @@ func (ev *Evaluator) installStdlib() {
 			}
 			fetched += res.Fetched
 			pushed += res.Pushed
+			synced++
 			msgs = append(msgs, t+": "+res.Message)
 			ev.Rec.Net(fmt.Sprintf("sync %s: fetched=%d pushed=%d", t, res.Fetched, res.Pushed))
+		}
+		if synced == 0 {
+			// Every target failed — that is NOT a successful sync.
+			return errMap("sync failed: " + strings.Join(msgs, "; ")), nil
 		}
 		return okMap("fetched", fetched, "pushed", pushed, "notes", strings.Join(msgs, "; ")), nil
 	})

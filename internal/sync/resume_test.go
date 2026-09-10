@@ -220,3 +220,28 @@ func TestSyncResumeSharedPrefix(t *testing.T) {
 		t.Fatalf("big.bin after incremental sync: err=%v len=%d", err, len(got))
 	}
 }
+
+// TestSyncRepeatPushesNothing locks the push-leg dedup: once both sides
+// share the history, a repeat sync must NOT re-offer the whole commit
+// chain (the remote's hello heads prove it already has their ancestry).
+func TestSyncRepeatPushesNothing(t *testing.T) {
+	a := mkRepo(t, "alice")
+	commitFile(t, a, "one.txt", "one\n", "first")
+	commitFile(t, a, "two.txt", "two\n", "second")
+	b := mkRepo(t, "bob")
+
+	first := syncPair(t, a, b)
+	if first.Fetched == 0 {
+		t.Fatal("first sync should fetch")
+	}
+	// Both sides now share history: a second sync in EITHER direction
+	// must be a clean no-op (no fetch, no re-offer).
+	second := syncPair(t, a, b)
+	if second.Fetched != 0 || second.Pushed != 0 {
+		t.Fatalf("repeat sync moved objects: fetched=%d pushed=%d (want 0/0)",
+			second.Fetched, second.Pushed)
+	}
+	if second.Message != "already up to date" {
+		t.Fatalf("repeat sync message: %q", second.Message)
+	}
+}

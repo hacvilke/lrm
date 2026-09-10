@@ -362,7 +362,7 @@ func (e *Engine) serveResponder(ctl *mux.Stream, sess *mux.Session, hello Msg, r
 	if remoteTip == cas.Nil {
 		// Remote is empty: push our history instead.
 		if localTip != cas.Nil {
-			if err := e.pushToRemote(ctl, sess, localTip, res); err != nil {
+			if err := e.pushToRemote(ctl, sess, localTip, res, nil); err != nil {
 				return err
 			}
 			if res.Pushed > 0 && res.Message == "" {
@@ -386,7 +386,7 @@ func (e *Engine) serveResponder(ctl *mux.Stream, sess *mux.Session, hello Msg, r
 	// Now push anything they lack (bidirectional).
 	if localTip != cas.Nil {
 		pushedBefore := res.Pushed
-		if err := e.pushToRemote(ctl, sess, localTip, res); err != nil {
+		if err := e.pushToRemote(ctl, sess, localTip, res, remoteHeads); err != nil {
 			return err
 		}
 		if n := res.Pushed - pushedBefore; n > 0 && (res.Message == "" || res.Message == "already up to date") {
@@ -855,11 +855,37 @@ func (e *Engine) serveInitiatorRequests(ctl *mux.Stream, sess *mux.Session, hell
 }
 
 // pushToRemote sends commits the remote lacks (dialer → responder).
-func (e *Engine) pushToRemote(ctl *mux.Stream, sess *mux.Session, localTip cas.Hash, res *SyncResult) error {
-	// Simplest correct push: send our tip's history (bounded walk).
+// remoteHeads are the heads the remote advertised in its hello: any head
+// we also have means its whole ancestry is already there — offering it
+// again is wasted bandwidth (and inflated Pushed counts on every repeat
+// sync of a persistent session).
+func (e *Engine) pushToRemote(ctl *mux.Stream, sess *mux.Session, localTip cas.Hash, res *SyncResult, remoteHeads []string) error {
+	// Simplest correct push: send our tip's history (bounded walk)...
 	hashes, commits, err := e.Repo.DAG.WalkTipOrder(localTip, 500)
 	if err != nil {
 		return err
+	}
+	// ...minus everything reachable from the remote's advertised heads.
+	exclude := map[cas.Hash]bool{}
+	for _, hh := range remoteHeads {
+		h, err := cas.ParseHex(hh)
+		if err != nil || h == cas.Nil || !e.Repo.DAG.Has(h) {
+			continue // unknown head: assume nothing about it
+		}
+		if _, chain, err := e.Repo.DAG.WalkTipOrder(h, 500); err == nil {
+			for _, c := range chain {
+				exclude[c.Hash()] = true
+			}
+		}
+	}
+	if len(exclude) > 0 {
+		kept := commits[:0]
+		for _, c := range commits {
+			if !exclude[c.Hash()] {
+				kept = append(kept, c)
+			}
+		}
+		commits = kept
 	}
 	// Send in small batches.
 	for i := 0; i < len(commits); i += 50 {

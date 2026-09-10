@@ -90,8 +90,16 @@ func RunFile(scriptPath string, opts Options) *Result {
 	if opts.Timeout > 0 {
 		ev.Deadline = start.Add(opts.Timeout)
 	}
+	// Note: blocking builtins cap their own waits to the deadline (see
+	// capMS/deadlineCtx), and tick() checks between statements; the
+	// post-run check below catches a last-statement overrun.
 	if err := ev.EvalProgram(prog); err != nil {
 		return finish(err)
+	}
+	// Last-statement overrun: the program finished, but a blocking
+	// builtin may have carried it past the deadline.
+	if !ev.Deadline.IsZero() && time.Now().After(ev.Deadline) {
+		return finish(fmt.Errorf("script timeout exceeded"))
 	}
 	return finish(nil)
 }

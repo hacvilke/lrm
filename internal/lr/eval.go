@@ -134,6 +134,16 @@ func (ev *Evaluator) tick(pos Pos) *RuntimeError {
 	return nil
 }
 
+// remaining reports the time left before the run deadline (ok=false when
+// no deadline is set). Blocking builtins use it to cap their own waits —
+// a single long sleep/http/dial must never outlive the run timeout.
+func (ev *Evaluator) remaining() (time.Duration, bool) {
+	if ev.Deadline.IsZero() {
+		return 0, false
+	}
+	return time.Until(ev.Deadline), true
+}
+
 func (ev *Evaluator) errf(pos Pos, format string, a ...any) *RuntimeError {
 	return &RuntimeError{Msg: fmt.Sprintf(format, a...), Pos: pos}
 }

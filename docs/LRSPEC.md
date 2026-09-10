@@ -71,7 +71,9 @@ return value;              // top-level return ends the program
 
 `for` over a map iterates sorted keys. `break`/`continue` only inside
 loops (parse-agnostic runtime error otherwise). Max call depth 500;
-infinite loops are stopped by the run timeout (default 5 min).
+infinite loops are stopped by the run timeout (default 5 min) — and
+blocking builtins (`sleep_ms`, network probes, `lrm_*` dials) cap their
+own waits to the same deadline, so a single long call cannot outlive it.
 
 ## 5. Builtins (pure)
 
@@ -118,7 +120,7 @@ failure). `http_get` caps bodies at 1 MiB.
 ## 9. LRM repo builtins (repo containing the run directory)
 
 ```js
-lrm_status();          // {ok, branch, tip, root, clean, changes:[{kind,path}]}
+lrm_status();          // {ok, branch, tip, root, clean, port, changes:[{kind,path}]}
 lrm_commit("msg");     // {ok, hash} — scan→commit→index→save, like the CLI
 lrm_log(10);           // {ok, commits:[{hash,author,time,message}]}
 lrm_peers();           // {ok, peers:[{user,addr,id,source}]} — 4s LAN browse

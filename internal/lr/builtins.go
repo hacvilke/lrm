@@ -181,7 +181,16 @@ func (ev *Evaluator) installBuiltins() {
 		if args[0].Kind != KNum || args[0].N < 0 {
 			return Null, ev.errf(pos, "sleep_ms() needs a non-negative number")
 		}
-		time.Sleep(time.Duration(args[0].N * float64(time.Millisecond)))
+		d := time.Duration(args[0].N * float64(time.Millisecond))
+		if left, ok := ev.remaining(); ok {
+			if left <= 0 {
+				return Null, &RuntimeError{Msg: "script timeout exceeded", Pos: pos}
+			}
+			if d > left {
+				d = left // never sleep past the run deadline
+			}
+		}
+		time.Sleep(d)
 		return Null, nil
 	})
 	reg("now_ms", func(ev *Evaluator, args []Value, pos Pos) (Value, *RuntimeError) {

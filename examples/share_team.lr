@@ -28,9 +28,9 @@ if s.clean == false {
 }
 
 // Generate the Port Key (needs internet for STUN; UPnP attempted).
+// The port comes from the repo config (lrm_status().port) — never hardcode.
 let st = lrm_status();
-let port = 18443;
-let key = lrm_share(port, true);
+let key = lrm_share(st.port, true);
 assert(key.ok, "port key generated");
 if key.ok {
   print("WAN: " + key.wan);

@@ -380,6 +380,7 @@ let c = lrm_commit("first via lr");
 assert(c.ok, "commit works");
 let s = lrm_status();
 assert(s.clean and s.branch == "main", "clean on main");
+assert(s.port == 8443, "status reports repo port");
 let l = lrm_log(5);
 assert(len(l.commits) == 1, "one commit");
 `), 0o644)
