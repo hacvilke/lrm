@@ -31,8 +31,14 @@ import (
 )
 
 // Msg is a control-stream JSON message.
+//
+// Envelope: new messages carry Fam (family). Absent fam = "sync" — the
+// legacy pre-envelope wire format, still spoken by v1 peers unchanged.
 type Msg struct {
+	Fam     string            `json:"fam,omitempty"` // message family ("" = sync/legacy)
 	Type    string            `json:"type"`
+	PV      int               `json:"pv,omitempty"`   // protocol version offered (hello only)
+	Fams    string            `json:"fams,omitempty"` // families offered, comma-sep (hello only)
 	Peer    string            `json:"peer,omitempty"`
 	Branch  string            `json:"branch,omitempty"`
 	Heads   []string          `json:"heads,omitempty"`
@@ -43,6 +49,14 @@ type Msg struct {
 	Error   string            `json:"error,omitempty"`
 	Extra   map[string]string `json:"extra,omitempty"`
 }
+
+// Protocol / envelope versioning.
+const (
+	// ProtoVersion is the highest protocol version this build speaks.
+	ProtoVersion = 2
+	// FamSync is the implicit family of all legacy sync messages.
+	FamSync = "sync"
+)
 
 // Engine syncs one repo with peers.
 type Engine struct {
@@ -65,6 +79,17 @@ type Engine struct {
 	// the sync completes, which matters on persistent sessions where
 	// SyncWithSession doesn't return until the peer hangs up.
 	OnHello func(user, node string)
+	// AdvertiseFams adds families to our hello beyond "sync" (e.g. the
+	// daemon advertises "relay" and "punch").
+	AdvertiseFams []string
+	// SessionVer is the negotiated session protocol version (filled from
+	// the remote hello; 1 when the peer is legacy).
+	SessionVer int
+	// RemoteFams holds the families the remote advertised.
+	RemoteFams map[string]bool
+	// Handlers, when set, receive non-sync-family messages on the
+	// responder loop (envelope dispatch). Unhandled families are ignored.
+	Handlers map[string]func(m Msg, ctl *mux.Stream, sess *mux.Session) error
 }
 
 // New creates an Engine.
@@ -85,7 +110,11 @@ type SyncResult struct {
 	// divergence detection) — the session was dropped so the daemon can
 	// re-dial and fetch it.
 	PeerHasNews bool
-	Message     string
+	// SessionVer is the negotiated protocol version for this session.
+	SessionVer int
+	// RemoteFams is the comma-separated family list the remote offered.
+	RemoteFams string
+	Message    string
 }
 
 // SyncWithSession runs a full bidirectional sync over an established mux
@@ -115,6 +144,7 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		res.RemoteUser = hello.Extra["user"]
 		res.RemoteNode = hello.Extra["node"]
 		res.RemoteNodePub = hello.Extra["nodepub"]
+		e.negotiate(hello, res)
 		if e.OnHello != nil {
 			e.OnHello(res.RemoteUser, res.RemoteNode)
 		}
@@ -138,24 +168,35 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		if err != nil {
 			return nil, err
 		}
-		res.RemotePeer = hello.Peer
-		res.RemoteUser = hello.Extra["user"]
-		res.RemoteNode = hello.Extra["node"]
-		res.RemoteNodePub = hello.Extra["nodepub"]
-		if e.OnHello != nil {
-			e.OnHello(res.RemoteUser, res.RemoteNode)
-		}
-		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
-			return res, err
-		}
-		if err := e.writeHello(ctl); err != nil {
-			return nil, err
-		}
-		if err := e.serveInitiatorRequests(ctl, sess, hello, res); err != nil {
-			return res, err
-		}
+		return e.ServeInbound(ctl, sess, hello)
 	}
 	_ = remoteBranch
+	return res, nil
+}
+
+// ServeInbound runs the responder path with a pre-read first message.
+// The daemon uses this to dispatch the first control message by family
+// (relay / punch sessions never send a sync hello) before committing to
+// a sync.
+func (e *Engine) ServeInbound(ctl *mux.Stream, sess *mux.Session, hello Msg) (*SyncResult, error) {
+	res := &SyncResult{}
+	res.RemotePeer = hello.Peer
+	res.RemoteUser = hello.Extra["user"]
+	res.RemoteNode = hello.Extra["node"]
+	res.RemoteNodePub = hello.Extra["nodepub"]
+	e.negotiate(hello, res)
+	if e.OnHello != nil {
+		e.OnHello(res.RemoteUser, res.RemoteNode)
+	}
+	if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
+		return res, err
+	}
+	if err := e.writeHello(ctl); err != nil {
+		return nil, err
+	}
+	if err := e.serveInitiatorRequests(ctl, sess, hello, res); err != nil {
+		return res, err
+	}
 	return res, nil
 }
 
@@ -237,6 +278,28 @@ func (e *Engine) PingRound(timeout time.Duration) (string, error) {
 	}
 }
 
+// negotiate records the session protocol version and remote families
+// from a remote hello. Version = min(ours, theirs); a hello without pv is
+// a v1 peer (legacy envelope-less wire format).
+func (e *Engine) negotiate(hello Msg, res *SyncResult) {
+	e.SessionVer = 1
+	if hello.PV > 1 {
+		v := ProtoVersion
+		if hello.PV < v {
+			v = hello.PV
+		}
+		e.SessionVer = v
+	}
+	e.RemoteFams = map[string]bool{}
+	for _, f := range strings.Split(hello.Fams, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			e.RemoteFams[f] = true
+		}
+	}
+	res.SessionVer = e.SessionVer
+	res.RemoteFams = hello.Fams
+}
+
 // writeHello advertises our branch heads.
 func (e *Engine) writeHello(w io.Writer) error {
 	branches, _ := e.Repo.ListBranches()
@@ -254,9 +317,15 @@ func (e *Engine) writeHello(w io.Writer) error {
 	if e.NodePub != "" {
 		extra["nodepub"] = e.NodePub
 	}
+	fams := FamSync
+	for _, f := range e.AdvertiseFams {
+		if f != "" && f != FamSync {
+			fams += "," + f
+		}
+	}
 	return writeMsg(w, Msg{
 		Type: "hello", Peer: e.Repo.Identity.HexID(), Branch: br, Heads: heads,
-		WS:    e.Repo.Config.Workspace,
+		PV: ProtoVersion, Fams: fams, WS: e.Repo.Config.Workspace,
 		Extra: extra,
 	})
 }
@@ -659,6 +728,16 @@ func (e *Engine) serveInitiatorRequests(ctl *mux.Stream, sess *mux.Session, hell
 		if err := json.Unmarshal(line, &m); err != nil {
 			continue
 		}
+		// Envelope dispatch: non-sync families go to registered handlers
+		// ("" fam = sync = legacy wire format, handled below).
+		if m.Fam != "" && m.Fam != FamSync {
+			if h, ok := e.Handlers[m.Fam]; ok {
+				if err := h(m, ctl, sess); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		switch m.Type {
 		case "done":
 			if res.Message == "" {
@@ -1012,6 +1091,13 @@ func (e *Engine) createMergeCommit(merged map[string]string, localTip, remoteTip
 }
 
 // --- wire helpers ---
+
+// WriteMsg encodes one control message (exported for daemon relay/punch
+// handlers that speak envelope families on mux streams).
+func WriteMsg(w io.Writer, m Msg) error { return writeMsg(w, m) }
+
+// ReadMsg decodes one control message (exported; see WriteMsg).
+func ReadMsg(r io.Reader) (Msg, error) { return readMsg(r) }
 
 func writeMsg(w io.Writer, m Msg) error {
 	raw, err := json.Marshal(m)
