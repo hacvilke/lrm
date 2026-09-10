@@ -100,6 +100,54 @@ func CheckAuth(extra map[string]string, book *node.Book) (string, error) {
 	return target, nil
 }
 
+// punchDomain prefixes the signed punch-signaling delivery.
+const punchDomain = "lrm-punch-v1"
+
+// SignPunchDelivery stamps an offer with the relaying device's signature
+// (over "<punchDomain>|<offerPeer>|<ts>") so the target can verify the
+// delivery came from a device IT paired — not a stranger scanning ports.
+func SignPunchDelivery(nodeKey *node.Identity, offerPeer string) (ts, sig string) {
+	ts = strconv.FormatInt(time.Now().Unix(), 10)
+	msg := punchDomain + "|" + offerPeer + "|" + ts
+	return ts, hex.EncodeToString(ed25519.Sign(nodeKey.Priv, []byte(msg)))
+}
+
+// VerifyPunchDelivery checks the relay's delivery auth against the
+// target's address book: paired device, fresh timestamp, valid signature
+// over the delivered offer's peer ID.
+func VerifyPunchDelivery(nodeHex, offerPeer, tsStr, sigHex string, book *node.Book) error {
+	if nodeHex == "" || tsStr == "" || sigHex == "" {
+		return fmt.Errorf("punch delivery not authenticated")
+	}
+	ts, err := strconv.ParseInt(tsStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("bad punch delivery timestamp")
+	}
+	if d := time.Since(time.Unix(ts, 0)); d > maxSkew || d < -maxSkew {
+		return fmt.Errorf("punch delivery stale")
+	}
+	if book == nil {
+		return fmt.Errorf("no address book")
+	}
+	entry := book.Get(nodeHex)
+	if entry == nil {
+		return fmt.Errorf("device %s is not paired", shortHex(nodeHex))
+	}
+	pub, err := hex.DecodeString(entry.Pub)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("pinned device key corrupt")
+	}
+	sig, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return fmt.Errorf("bad signature encoding")
+	}
+	msg := punchDomain + "|" + offerPeer + "|" + tsStr
+	if !ed25519.Verify(pub, []byte(msg), sig) {
+		return fmt.Errorf("signature check failed")
+	}
+	return nil
+}
+
 // Pipe relays bytes between a mux stream and the dialed target until
 // either side closes. The relay never inspects the payload.
 func Pipe(dst net.Conn, st *mux.Stream) error {

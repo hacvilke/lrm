@@ -41,6 +41,13 @@ type Offer struct {
 	Cands []string `json:"cands"`          // host:port candidates
 	WS    string   `json:"ws,omitempty"`   // workspace id hex (display)
 	User  string   `json:"user,omitempty"` // display name
+
+	// Delivery auth: set by the relaying device, verified by the target
+	// against ITS address book — a stranger who can merely reach the
+	// target's port must never make it leak punch candidates.
+	RelayNode string `json:"relay_node,omitempty"`
+	RelayTS   string `json:"relay_ts,omitempty"`
+	RelaySig  string `json:"relay_sig,omitempty"`
 }
 
 // EncodeLine renders "<PREAMBLE><json>\n".
