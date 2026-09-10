@@ -51,6 +51,20 @@ type Engine struct {
 	// the hello extras. Optional — CLI one-shot syncs leave them empty.
 	NodeHex string
 	NodePub string
+	// Ctl is the dialer's control stream, kept after SyncWithSession
+	// returns so the daemon can run keepalive rounds on the same stream
+	// (the responder serves pings in its read loop). Responder side: nil.
+	Ctl *mux.Stream
+	// KeepCtl leaves the control stream open after the sync completes
+	// (daemon mode: the session stays live for keepalive rounds). One-shot
+	// callers leave it false: the stream is FIN'd so the responder's serve
+	// loop unblocks instead of waiting for a ping that never comes.
+	KeepCtl bool
+	// OnHello, when set, fires the moment the remote hello is read (both
+	// roles) — lets the daemon fill presence fields (user, device) before
+	// the sync completes, which matters on persistent sessions where
+	// SyncWithSession doesn't return until the peer hangs up.
+	OnHello func(user, node string)
 }
 
 // New creates an Engine.
@@ -67,7 +81,11 @@ type SyncResult struct {
 	MergedCommit   string
 	ConflictBranch string
 	FastForwarded  bool
-	Message        string
+	// PeerHasNews: the peer advertised a tip we don't have (keepalive
+	// divergence detection) — the session was dropped so the daemon can
+	// re-dial and fetch it.
+	PeerHasNews bool
+	Message     string
 }
 
 // SyncWithSession runs a full bidirectional sync over an established mux
@@ -82,6 +100,7 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		if err != nil {
 			return nil, err
 		}
+		e.Ctl = ctl // kept for post-sync keepalive rounds
 		if err := e.writeHello(ctl); err != nil {
 			return nil, err
 		}
@@ -96,11 +115,19 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		res.RemoteUser = hello.Extra["user"]
 		res.RemoteNode = hello.Extra["node"]
 		res.RemoteNodePub = hello.Extra["nodepub"]
+		if e.OnHello != nil {
+			e.OnHello(res.RemoteUser, res.RemoteNode)
+		}
 		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
 			return res, err
 		}
 		if err := e.serveResponder(ctl, sess, hello, res); err != nil {
 			return res, err
+		}
+		if !e.KeepCtl {
+			// One-shot: FIN the control stream so the responder's serve
+			// loop unblocks (it keeps serving after "done" for daemons).
+			_ = ctl.Close()
 		}
 	} else {
 		ctl, err = sess.AcceptStream()
@@ -115,6 +142,9 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		res.RemoteUser = hello.Extra["user"]
 		res.RemoteNode = hello.Extra["node"]
 		res.RemoteNodePub = hello.Extra["nodepub"]
+		if e.OnHello != nil {
+			e.OnHello(res.RemoteUser, res.RemoteNode)
+		}
 		if ok, err := e.workspaceGate(ctl, hello, res); err != nil || !ok {
 			return res, err
 		}
@@ -158,6 +188,53 @@ func (e *Engine) workspaceGate(ctl *mux.Stream, hello Msg, res *SyncResult) (boo
 		return false, nil
 	}
 	return true, nil
+}
+
+// PingRound sends one keepalive ping on the dialer's control stream and
+// waits up to timeout for the pong. Returns the peer's advertised tip
+// ("" when they have none). The peer reacts to OUR tip per the ping
+// handler (dropping the session if we have news). Requires a completed
+// SyncWithSession as the dialer (e.Ctl set).
+func (e *Engine) PingRound(timeout time.Duration) (string, error) {
+	if e.Ctl == nil {
+		return "", fmt.Errorf("no control stream for keepalive")
+	}
+	br, _ := e.Repo.HeadBranch()
+	tipHex, _ := e.Repo.GetRef(br)
+	heads := []string{}
+	if tipHex != "" {
+		heads = append(heads, tipHex)
+	}
+	if err := writeMsg(e.Ctl, Msg{Type: "ping", Heads: heads}); err != nil {
+		return "", err
+	}
+	type pong struct {
+		tip string
+		err error
+	}
+	ch := make(chan pong, 1)
+	go func() {
+		m, err := readMsg(e.Ctl)
+		if err != nil {
+			ch <- pong{"", err}
+			return
+		}
+		if m.Type != "pong" {
+			ch <- pong{"", fmt.Errorf("expected pong, got %q", m.Type)}
+			return
+		}
+		if len(m.Heads) > 0 {
+			ch <- pong{m.Heads[0], nil}
+		} else {
+			ch <- pong{"", nil}
+		}
+	}()
+	select {
+	case r := <-ch:
+		return r.tip, r.err
+	case <-time.After(timeout):
+		return "", fmt.Errorf("keepalive pong timeout")
+	}
 }
 
 // writeHello advertises our branch heads.
@@ -587,8 +664,8 @@ func (e *Engine) serveInitiatorRequests(ctl *mux.Stream, sess *mux.Session, hell
 			if res.Message == "" {
 				res.Message = fmt.Sprintf("served sync (pushed=%d fetched=%d)", res.Pushed, res.Fetched)
 			}
-			// Peer finished; now pull anything THEY have that we lack?
-			// (Bidirectional: request their tip if unknown.)
+			// Peer finished fetching; now pull anything THEY have that we
+			// lack? (Bidirectional: request their tip if unknown.)
 			if len(hello.Heads) > 0 {
 				if h, err := cas.ParseHex(hello.Heads[0]); err == nil && !e.Repo.DAG.Has(h) {
 					// Best-effort fetch via new control stream.
@@ -600,7 +677,8 @@ func (e *Engine) serveInitiatorRequests(ctl *mux.Stream, sess *mux.Session, hell
 					}
 				}
 			}
-			return nil
+			// Persistent sessions: KEEP SERVING (pings from live daemons)
+			// until the dialer FINs the control stream or disconnects.
 		case "want":
 			var raws []json.RawMessage
 			for _, w := range m.Want {
@@ -634,6 +712,28 @@ func (e *Engine) serveInitiatorRequests(ctl *mux.Stream, sess *mux.Session, hell
 				if !e.Repo.DAG.Has(h) {
 					_, _ = e.Repo.DAG.Put(&c)
 					res.Fetched++
+				}
+			}
+		case "ping":
+			// Keepalive from a connected dialer: reply with our tip so
+			// they can detect divergence without a full sync round.
+			br, _ := e.Repo.HeadBranch()
+			tipHex, _ := e.Repo.GetRef(br)
+			heads := []string{}
+			if tipHex != "" {
+				heads = append(heads, tipHex)
+			}
+			if err := writeMsg(ctl, Msg{Type: "pong", Peer: e.Repo.Identity.HexID(), Heads: heads}); err != nil {
+				return err
+			}
+			// If the dialer's tip is news to us, drop the session so our
+			// own daemon re-dials and pulls it (hang-up-and-callback).
+			if len(m.Heads) > 0 {
+				if h, err := cas.ParseHex(m.Heads[0]); err == nil && !e.Repo.DAG.Has(h) {
+					res.PeerHasNews = true
+					res.Message = "peer advertised newer history — reconnecting"
+					_ = sess.Close()
+					return nil
 				}
 			}
 		case "push-tip":

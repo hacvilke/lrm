@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -549,6 +550,7 @@ func cmdStatus(args []string) error {
 	fmt.Printf("root:   %s\n", cas.Hex(res.RootHash)[:12])
 	if res.Clean {
 		fmt.Println("status: clean (no changes)")
+		printLiveDaemon(r.LrmDir)
 		return nil
 	}
 	fmt.Printf("status: %d change(s):\n", len(res.Changes))
@@ -556,6 +558,104 @@ func cmdStatus(args []string) error {
 		fmt.Printf("  %-8s %s\n", ch.Kind, ch.Path)
 	}
 	return nil
+}
+
+// daemonStatus holds the live-daemon presence snapshot.
+type daemonStatus struct {
+	OK        bool         `json:"ok"`
+	User      string       `json:"user"`
+	Workspace string       `json:"workspace"`
+	Node      string       `json:"node"`
+	UptimeSec int64        `json:"uptime_sec"`
+	Peers     []daemonPeer `json:"peers"`
+}
+
+type daemonPeer struct {
+	User  string `json:"user"`
+	Peer  string `json:"peer"`
+	Addr  string `json:"addr"`
+	WS    string `json:"ws"`
+	State string `json:"state"`
+	Since string `json:"since"`
+	RTTms int64  `json:"rtt_ms"`
+}
+
+// queryDaemon asks the running daemon over .lrm/daemon.sock.
+func queryDaemon(lrmDir, cmd string) *daemonStatus {
+	path := filepath.Join(lrmDir, "daemon.sock")
+	conn, err := net.DialTimeout("unix", path, 700*time.Millisecond)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	if _, err := conn.Write([]byte(`{"cmd":"` + cmd + `"}` + "\n")); err != nil {
+		return nil
+	}
+	raw, err := io_readLine(conn)
+	if err != nil {
+		return nil
+	}
+	var st daemonStatus
+	if err := json.Unmarshal(raw, &st); err != nil || !st.OK {
+		return nil
+	}
+	return &st
+}
+
+func io_readLine(conn net.Conn) ([]byte, error) {
+	var buf []byte
+	b := make([]byte, 1)
+	for len(buf) < 1<<20 {
+		n, err := conn.Read(b)
+		if n > 0 {
+			buf = append(buf, b[:n]...)
+			if b[n-1] == '\n' {
+				return buf, nil
+			}
+		}
+		if err != nil {
+			if len(buf) > 0 {
+				return buf, nil
+			}
+			return nil, err
+		}
+	}
+	return buf, nil
+}
+
+// printLiveDaemon renders the live presence table for `lrm status`.
+func printLiveDaemon(lrmDir string) {
+	st := queryDaemon(lrmDir, "status")
+	if st == nil {
+		fmt.Println("daemon: not running (run `lrm daemon` to go live)")
+		return
+	}
+	ups := st.UptimeSec
+	upStr := fmt.Sprintf("%dd%02dh%02dm", ups/86400, ups%86400/3600, ups%3600/60)
+	fmt.Printf("daemon: live (uptime %s)\n", upStr)
+	if len(st.Peers) == 0 {
+		fmt.Println("  no peers connected")
+		return
+	}
+	fmt.Printf("  %-10s %-22s %-8s %6s  %s\n", "peer", "addr", "state", "rtt", "since")
+	for _, p := range st.Peers {
+		user := p.User
+		if user == "" {
+			if len(p.Peer) >= 8 {
+				user = p.Peer[:8]
+			}
+		}
+		rtt := "-"
+		if p.RTTms > 0 {
+			rtt = fmt.Sprintf("%dms", p.RTTms)
+		}
+		since := p.Since
+		if len(since) >= 19 {
+			since = since[11:19] // HH:MM:SS of the RFC3339 timestamp
+		}
+		fmt.Printf("  %-10s %-22s %-8s %6s  %s\n", user, p.Addr, p.State, rtt, since)
+	}
 }
 
 func cmdCommit(args []string) error {
@@ -1092,6 +1192,12 @@ func cmdPeers(args []string) error {
 		}
 	}
 	fmt.Printf("discovering LAN peers for %ds...\n", secs)
+	if r, err := openRepo(); err == nil {
+		if st := queryDaemon(r.LrmDir, "status"); st != nil {
+			fmt.Printf("daemon: live — %d peer(s) connected\n", len(st.Peers))
+		}
+		_ = r.Close()
+	}
 	ctx := context.Background()
 	peers, err := mdns.Browse(ctx, time.Duration(secs)*time.Second)
 	if err != nil {
@@ -1432,6 +1538,7 @@ func cmdSync(args []string) error {
 
 func cmdDaemon(args []string) error {
 	portStr, _ := flagVal(args, "--port", "-p")
+	staticPeer, _ := flagVal(args, "--peer")
 	r, err := openRepo()
 	if err != nil {
 		return err
@@ -1444,20 +1551,33 @@ func cmdDaemon(args []string) error {
 	}
 	cfg := daemon.DefaultConfig(port)
 	d := daemon.New(r, cfg)
+	if staticPeer != "" {
+		if err := d.AddStaticPeer(staticPeer); err != nil {
+			return err
+		}
+	}
 	d.OnSync(func(res *sync.SyncResult) {
 		fmt.Printf("[sync] %s (fetched=%d pushed=%d)\n", res.Message, res.Fetched, res.Pushed)
 	})
 	d.OnChange(func(n int) {
 		fmt.Printf("[watch] auto-committed %d change(s)\n", n)
 	})
+	d.OnEvent(func(msg string) {
+		fmt.Printf("[mesh] %s\n", msg)
+	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	d.SetStopFunc(stop) // control socket: {"cmd":"stop"}
 	nodeInfo := ""
 	if id, err := node.LoadOrCreateIdentity(); err == nil {
 		nodeInfo = fmt.Sprintf(", device %s", id.ShortID())
 	}
 	fmt.Printf("LRM daemon starting (user %s, peer %s%s, port %d)\n", r.Config.User, r.Identity.ShortID(), nodeInfo, port)
 	fmt.Println("watching workspace + announcing on LAN. Ctrl-C to stop (mappings will be removed).")
+	fmt.Println("control socket: .lrm/daemon.sock — `lrm status` shows the live presence table.")
+	if staticPeer != "" {
+		fmt.Printf("static peer: %s (dialed continuously)\n", staticPeer)
+	}
 	if err := d.Run(ctx); err != nil {
 		return err
 	}

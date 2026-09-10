@@ -49,9 +49,15 @@ func (s *Stream) Read(p []byte) (int, error) {
 		if s.err != nil {
 			return 0, s.err
 		}
-		chunk, ok := <-s.readCh
-		if !ok {
-			return 0, io.EOF
+		var chunk []byte
+		select {
+		case c, ok := <-s.readCh:
+			if !ok {
+				return 0, io.EOF
+			}
+			chunk = c
+		case <-s.sess.done:
+			return 0, io.EOF // session died under us
 		}
 		if chunk == nil { // FIN marker
 			s.finSeen.Store(true)
@@ -115,7 +121,10 @@ type Session struct {
 
 	acceptCh chan *Stream
 	closed   atomic.Bool
-	err      error
+	// done is closed exactly once when the session dies; it wakes every
+	// stream reader blocked on an empty readCh (no goroutine leaks).
+	done chan struct{}
+	err  error
 }
 
 // NewSession starts muxing over conn. Odd ids are locally-initiated when
@@ -123,7 +132,7 @@ type Session struct {
 func NewSession(conn net.Conn, initiator bool) *Session {
 	s := &Session{
 		conn: conn, streams: map[uint32]*Stream{},
-		acceptCh: make(chan *Stream, 64),
+		acceptCh: make(chan *Stream, 64), done: make(chan struct{}),
 	}
 	if initiator {
 		s.nextID.Store(1)
@@ -156,12 +165,13 @@ func (s *Session) AcceptStream() (*Stream, error) {
 	return st, nil
 }
 
-// Close shuts the session and underlying conn.
+// Close shuts the session and underlying conn, waking all stream readers.
 func (s *Session) Close() error {
 	if s.closed.Swap(true) {
 		return nil
 	}
 	close(s.acceptCh)
+	close(s.done)
 	return s.conn.Close()
 }
 
