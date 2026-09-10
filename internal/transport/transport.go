@@ -197,6 +197,21 @@ func Dial(ctx context.Context, addr string, sign identityIface, localPub []byte,
 	return sc, nil
 }
 
+// HandshakeOver runs the initiator handshake on an already-established
+// connection (e.g. a relay pipe or a punched socket), pinning the remote
+// to expectedPeerID when non-nil.
+func HandshakeOver(raw net.Conn, sign identityIface, localPub, expectedPeerID []byte) (*SecureConn, error) {
+	if err := raw.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return nil, err
+	}
+	sc, err := initiatorHandshake(raw, sign, localPub, expectedPeerID)
+	if err != nil {
+		return nil, err
+	}
+	_ = raw.SetDeadline(time.Time{})
+	return sc, nil
+}
+
 // Listener wraps a TCP listener with responder handshakes.
 type Listener struct {
 	ln   net.Listener

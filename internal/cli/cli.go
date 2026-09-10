@@ -25,6 +25,7 @@ import (
 	"github.com/lrm-project/lrm/internal/node"
 	"github.com/lrm-project/lrm/internal/patch"
 	"github.com/lrm-project/lrm/internal/portkey"
+	"github.com/lrm-project/lrm/internal/relay"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
 	"github.com/lrm-project/lrm/internal/sync"
@@ -1420,8 +1421,9 @@ func wsBytes(wsHex string) []byte {
 
 func cmdJoin(args []string) error {
 	initFlag, args := hasFlag(args, "--init")
+	viaAddr, args := flagVal(args, "--via")
 	if len(args) == 0 {
-		return fmt.Errorf("usage: lrm join <portkey> [--init]")
+		return fmt.Errorf("usage: lrm join <portkey> [--init] [--via H:P]")
 	}
 	keyStr := args[0]
 	key, err := portkey.Decode(keyStr)
@@ -1463,10 +1465,23 @@ func cmdJoin(args []string) error {
 			}
 		}
 	}
-	fmt.Printf("dialing %s (peer %x)...\n", key.Addr(), key.PeerID[:4])
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if viaAddr != "" {
+		fmt.Printf("dialing %s (peer %x) via relay %s...\n", key.Addr(), key.PeerID[:4], viaAddr)
+	} else {
+		fmt.Printf("dialing %s (peer %x)...\n", key.Addr(), key.PeerID[:4])
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	sc, err := transport.Dial(ctx, key.Addr(), r.Identity, r.Identity.Pub, key.PeerID)
+	var sc *transport.SecureConn
+	if viaAddr != "" {
+		nodeID, nerr := node.LoadOrCreateIdentity()
+		if nerr != nil {
+			return fmt.Errorf("device identity unavailable: %w", nerr)
+		}
+		sc, err = relay.Connect(ctx, viaAddr, key.Addr(), r.Identity, nodeID, key.PeerID)
+	} else {
+		sc, err = transport.Dial(ctx, key.Addr(), r.Identity, r.Identity.Pub, key.PeerID)
+	}
 	if err != nil {
 		return fmt.Errorf("secure dial failed: %w", err)
 	}
@@ -1489,6 +1504,7 @@ func cmdJoin(args []string) error {
 
 func cmdSync(args []string) error {
 	peerAddr, _ := flagVal(args, "--peer")
+	viaAddr, _ := flagVal(args, "--via")
 	r, err := openRepo()
 	if err != nil {
 		return err
@@ -1513,10 +1529,24 @@ func cmdSync(args []string) error {
 	if len(targets) == 0 {
 		return fmt.Errorf("no peers to sync with (try --peer HOST:PORT or run `lrm daemon` on teammates' machines)")
 	}
+	nodeID, nodeErr := node.LoadOrCreateIdentity()
+	if viaAddr != "" && nodeErr != nil {
+		return fmt.Errorf("device identity unavailable: %w", nodeErr)
+	}
 	for _, t := range targets {
-		fmt.Printf("syncing with %s...\n", t)
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		sc, err := transport.Dial(ctx, t, r.Identity, r.Identity.Pub, nil) // TOFU on LAN
+		if viaAddr != "" {
+			fmt.Printf("syncing with %s via relay %s...\n", t, viaAddr)
+		} else {
+			fmt.Printf("syncing with %s...\n", t)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+		var sc *transport.SecureConn
+		var err error
+		if viaAddr != "" {
+			sc, err = relay.Connect(ctx, viaAddr, t, r.Identity, nodeID, nil) // TOFU on target
+		} else {
+			sc, err = transport.Dial(ctx, t, r.Identity, r.Identity.Pub, nil) // TOFU on LAN
+		}
 		cancel()
 		if err != nil {
 			fmt.Printf("  dial failed: %v\n", shortErr(err))

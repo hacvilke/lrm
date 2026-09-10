@@ -19,7 +19,9 @@ import (
 	"github.com/lrm-project/lrm/internal/mdns"
 	"github.com/lrm-project/lrm/internal/merkle"
 	"github.com/lrm-project/lrm/internal/mux"
+	"github.com/lrm-project/lrm/internal/node"
 	"github.com/lrm-project/lrm/internal/portkey"
+	"github.com/lrm-project/lrm/internal/relay"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/sync"
 	"github.com/lrm-project/lrm/internal/transport"
@@ -105,12 +107,14 @@ func cmdPull(args []string) error {
 
 func cmdClone(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: lrm clone <portkey> [dir]")
+		return fmt.Errorf("usage: lrm clone <portkey> [dir] [--via H:P]")
 	}
 	keyStr := args[0]
 	dir := ""
-	if len(args) > 1 {
-		dir = args[1]
+	rest := args[1:]
+	viaAddr, rest := flagVal(rest, "--via")
+	if len(rest) > 0 {
+		dir = rest[0]
 	} else {
 		dir = "lrm-clone"
 	}
@@ -135,8 +139,12 @@ func cmdClone(args []string) error {
 		return err
 	}
 	defer r.Close()
-	fmt.Printf("cloning from %s (peer %x) into %s...\n", key.Addr(), key.PeerID[:4], abs)
-	res, err := dialAndSync(r, key.Addr(), key.PeerID)
+	if viaAddr != "" {
+		fmt.Printf("cloning from %s (peer %x) via relay %s into %s...\n", key.Addr(), key.PeerID[:4], viaAddr, abs)
+	} else {
+		fmt.Printf("cloning from %s (peer %x) into %s...\n", key.Addr(), key.PeerID[:4], abs)
+	}
+	res, err := dialAndSyncVia(r, key.Addr(), key.PeerID, viaAddr)
 	if err != nil {
 		return fmt.Errorf("clone failed: %w", err)
 	}
@@ -508,9 +516,25 @@ func resolveTargets(explicit string) ([]string, error) {
 }
 
 func dialAndSync(r *store.Repo, addr string, expectPeerID []byte) (*sync.SyncResult, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	return dialAndSyncVia(r, addr, expectPeerID, "")
+}
+
+// dialAndSyncVia dials addr directly, or through the paired-peer relay at
+// viaAddr (see internal/relay), then runs a full bidirectional sync.
+func dialAndSyncVia(r *store.Repo, addr string, expectPeerID []byte, viaAddr string) (*sync.SyncResult, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	sc, err := transport.Dial(ctx, addr, r.Identity, r.Identity.Pub, expectPeerID)
+	var sc *transport.SecureConn
+	var err error
+	if viaAddr != "" {
+		nodeID, nerr := node.LoadOrCreateIdentity()
+		if nerr != nil {
+			return nil, fmt.Errorf("device identity unavailable: %w", nerr)
+		}
+		sc, err = relay.Connect(ctx, viaAddr, addr, r.Identity, nodeID, expectPeerID)
+	} else {
+		sc, err = transport.Dial(ctx, addr, r.Identity, r.Identity.Pub, expectPeerID)
+	}
 	if err != nil {
 		return nil, err
 	}

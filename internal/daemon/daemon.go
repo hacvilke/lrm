@@ -24,6 +24,7 @@ import (
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
 	"github.com/lrm-project/lrm/internal/node"
+	"github.com/lrm-project/lrm/internal/relay"
 	"github.com/lrm-project/lrm/internal/staging"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
@@ -345,14 +346,31 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 	}
 	d.peers.Store(peerHex, pc)
 	defer d.dropPeer(pc)
+	// Family dispatch: a relay session never sends a sync hello — its
+	// first message is a fam=relay connect. Everything else is a sync.
+	ctl, err := sess.AcceptStream()
+	if err != nil {
+		return
+	}
+	_ = sc.SetDeadline(time.Now().Add(30 * time.Second)) // first msg must arrive promptly
+	first, err := lrmsync.ReadMsg(ctl)
+	if err != nil {
+		return
+	}
+	_ = sc.SetDeadline(time.Time{})
+	if first.Fam == relay.Fam {
+		d.handleRelay(ctl, first)
+		return
+	}
 	eng := lrmsync.New(d.repo)
+	eng.AdvertiseFams = []string{relay.Fam}
 	eng.OnHello = func(user, node string) {
 		if user != "" {
 			pc.remoteUser = user
 		}
 	}
 	d.stampNode(eng)
-	res, err := eng.SyncWithSession(sess, false, "")
+	res, err := eng.ServeInbound(ctl, sess, first)
 	_ = sess.Close()
 	if err != nil {
 		return
@@ -519,6 +537,7 @@ func (d *Daemon) dialPeer(ctx context.Context, p mdns.Peer) {
 	defer func() { d.dropPeer(pc); _ = sess.Close() }()
 	eng := lrmsync.New(d.repo)
 	eng.KeepCtl = true // persistent session: keepalive rides the ctl stream
+	eng.AdvertiseFams = []string{relay.Fam}
 	eng.OnHello = func(user, node string) {
 		if user != "" {
 			pc.remoteUser = user
@@ -704,6 +723,31 @@ func writeControlJSON(conn net.Conn, v any) {
 		return
 	}
 	_, _ = conn.Write(append(raw, '\n'))
+}
+
+// handleRelay serves a fam=relay connect: verify the requesting device is
+// paired and the request is freshly signed, dial the requested target,
+// and pipe bytes blind. The daemon advertises the "relay" family in its
+// hello, so peers can discover the capability before asking.
+func (d *Daemon) handleRelay(ctl *mux.Stream, m lrmsync.Msg) {
+	target, err := relay.VerifyRequest(m, d.book)
+	if err != nil {
+		d.event("relay refused: %v", err)
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: relay.Fam, Type: "error", Error: err.Error()})
+		return
+	}
+	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		d.event("relay: target %s unreachable (%v)", target, err)
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: relay.Fam, Type: "error", Error: "target unreachable: " + err.Error()})
+		return
+	}
+	if err := lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: relay.Fam, Type: "open"}); err != nil {
+		_ = dst.Close()
+		return
+	}
+	d.event("relaying for %s -> %s", shortNodeHex(m.Extra["node"]), target)
+	_ = relay.Pipe(dst, ctl)
 }
 
 // stampNode attaches the machine's device identity to an engine so hellos
