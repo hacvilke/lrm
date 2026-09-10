@@ -69,6 +69,10 @@ type Engine struct {
 	// returns so the daemon can run keepalive rounds on the same stream
 	// (the responder serves pings in its read loop). Responder side: nil.
 	Ctl *mux.Stream
+	// BWLimit caps the fetch read rate in bytes/second (0 = uncapped).
+	// Pacing the reader paces the transfer via TCP backpressure.
+	BWLimit int64
+
 	// fetchedObjects counts trees/blobs/chunks moved via fetchObjects;
 	// merged into SyncResult.Fetched so resume granularity is visible.
 	fetchedObjects int
@@ -570,6 +574,12 @@ func (e *Engine) fetchObjects(ctl *mux.Stream, sess *mux.Session, objs []cas.Has
 		return err
 	}
 	defer resp.Close()
+	// One pacer spans the WHOLE transfer: a per-object limiter would
+	// reset its burst budget for every object and cap nothing.
+	src := io.Reader(resp)
+	if e.BWLimit > 0 {
+		src = &pacedReader{r: resp, rate: e.BWLimit}
+	}
 	for _, want := range hexes {
 		hdr := make([]byte, 72)
 		if _, err := io.ReadFull(resp, hdr); err != nil {
@@ -588,7 +598,7 @@ func (e *Engine) fetchObjects(ctl *mux.Stream, sess *mux.Session, objs []cas.Has
 			return err
 		}
 		// Stream directly into CAS temp file with bounded buffer.
-		if err := e.streamIntoCAS(h, resp, int64(size)); err != nil {
+		if err := e.streamIntoCAS(h, src, int64(size)); err != nil {
 			return fmt.Errorf("store %s: %w", gotHex[:8], err)
 		}
 	}
@@ -627,6 +637,49 @@ func (e *Engine) streamIntoCAS(h cas.Hash, r io.Reader, size int64) error {
 		return cpErr
 	}
 	return putErr
+}
+
+// pacedReader is a simple token-bucket rate limiter: bursts up to one
+// second of budget, then paced sleeps, so a capped transfer converges on
+// rate bytes/second without tiny-read stalls.
+type pacedReader struct {
+	r     io.Reader
+	rate  int64 // bytes per second
+	bud   int64 // burst budget (bytes)
+	budAt time.Time
+}
+
+func (p *pacedReader) Read(b []byte) (int, error) {
+	if p.budAt.IsZero() {
+		p.budAt = time.Now()
+		p.bud = p.rate // initial one-second burst
+	}
+	if p.bud <= 0 {
+		// Refill proportionally to elapsed time.
+		elapsed := time.Since(p.budAt)
+		refill := int64(elapsed.Seconds() * float64(p.rate))
+		if refill > 0 {
+			p.bud += refill
+			p.budAt = p.budAt.Add(elapsed)
+			if p.bud > p.rate {
+				p.bud = p.rate
+			}
+		}
+		if p.bud <= 0 {
+			sleep := time.Second - time.Since(p.budAt)
+			if sleep > 0 {
+				time.Sleep(sleep)
+			}
+			p.bud = p.rate
+			p.budAt = time.Now()
+		}
+	}
+	if int64(len(b)) > p.bud {
+		b = b[:p.bud]
+	}
+	n, err := p.r.Read(b)
+	p.bud -= int64(n)
+	return n, err
 }
 
 // --- integration (fast-forward / merge / conflict branch) ---

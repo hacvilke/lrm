@@ -27,6 +27,7 @@ import (
 	"github.com/lrm-project/lrm/internal/node"
 	"github.com/lrm-project/lrm/internal/punch"
 	"github.com/lrm-project/lrm/internal/relay"
+	"github.com/lrm-project/lrm/internal/send"
 	"github.com/lrm-project/lrm/internal/staging"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
@@ -84,10 +85,12 @@ type Daemon struct {
 	nodeID *node.Identity
 	book   *node.Book
 	// Control socket (live presence for the CLI) + lifecycle.
-	started time.Time
-	stopFn  func()
-	ctrlMu  sync.Mutex
-	ctrlLn  net.Listener
+	started  time.Time
+	stopFn   func()
+	ctrlMu   sync.Mutex
+	watchMu  sync.Mutex
+	watchers []chan string
+	ctrlLn   net.Listener
 	// statics: explicitly configured peers (lrm daemon --peer host:port),
 	// dialed every round in addition to discovered LAN peers.
 	statics sync.Map // "host:port" -> mdns.Peer
@@ -159,8 +162,35 @@ func (d *Daemon) Uptime() time.Duration { return time.Since(d.started) }
 
 // event emits a mesh event if a listener is attached.
 func (d *Daemon) event(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
 	if d.onEvent != nil {
-		d.onEvent(fmt.Sprintf(format, args...))
+		d.onEvent(msg)
+	}
+	// Fan out to control-socket watchers (`lrm watch`).
+	d.watchMu.Lock()
+	for _, ch := range d.watchers {
+		select {
+		case ch <- msg:
+		default: // slow watcher: drop rather than block the daemon
+		}
+	}
+	d.watchMu.Unlock()
+}
+
+// subscribeWatch registers a control-socket event watcher and returns
+// its channel plus a removal func.
+func (d *Daemon) subscribeWatch() (<-chan string, func()) {
+	ch := make(chan string, 64)
+	d.watchMu.Lock()
+	d.watchers = append(d.watchers, ch)
+	i := len(d.watchers) - 1
+	d.watchMu.Unlock()
+	return ch, func() {
+		d.watchMu.Lock()
+		defer d.watchMu.Unlock()
+		if i < len(d.watchers) && d.watchers[i] == ch {
+			d.watchers = append(d.watchers[:i], d.watchers[i+1:]...)
+		}
 	}
 }
 
@@ -383,6 +413,11 @@ func (d *Daemon) handlePunchSignal(raw net.Conn) {
 		_ = raw.Close()
 		return
 	}
+	if verr := relay.VerifyPunchDelivery(offer.RelayNode, offer.Peer, offer.RelayTS, offer.RelaySig, d.book); verr != nil {
+		d.event("punch delivery refused: %v", verr)
+		_ = raw.Close()
+		return
+	}
 	res, err := punch.Reserve(3, punchIP())
 	if err != nil {
 		_ = raw.Close()
@@ -454,6 +489,39 @@ func peerName(o punch.Offer) string {
 	return o.Peer
 }
 
+// bwlimitEnv reads LRM_BWLIMIT (e.g. "2MB") for daemon-driven transfers.
+func bwlimitEnv() int64 {
+	s := os.Getenv("LRM_BWLIMIT")
+	if s == "" {
+		return 0
+	}
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(s, "KB"), strings.HasSuffix(s, "kb"):
+		mult, s = 1024, s[:len(s)-2]
+	case strings.HasSuffix(s, "MB"), strings.HasSuffix(s, "mb"):
+		mult, s = 1024*1024, s[:len(s)-2]
+	case strings.HasSuffix(s, "GB"), strings.HasSuffix(s, "gb"):
+		mult, s = 1024*1024*1024, s[:len(s)-2]
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n * mult
+}
+
+// handleSend receives a direct file transfer (fam=send): workspace-gated,
+// hash-verified, landed in <repo>/inbox/ where the watcher commits it.
+func (d *Daemon) handleSend(ctl *mux.Stream, m lrmsync.Msg, peerHex string) {
+	res, err := send.Serve(ctl, m, d.repo)
+	if err != nil {
+		d.event("send from %s failed: %v", shortNodeHex(peerHex), err)
+		return
+	}
+	d.event("send: received %s (%d bytes) from peer %s — landing in inbox/", res.Name, res.Size, shortNodeHex(peerHex))
+}
+
 // handlePunchRelay relays punch signaling: an authenticated paired device
 // asks us to deliver a punch offer to a target; we exchange the two
 // signaling lines and return the answer. Data never flows through us —
@@ -470,6 +538,14 @@ func (d *Daemon) handlePunchRelay(ctl *mux.Stream, m lrmsync.Msg) {
 		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "bad offer: " + err.Error()})
 		return
 	}
+	if d.nodeID == nil {
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "relay has no device identity"})
+		return
+	}
+	// Stamp our own delivery auth: the target only answers offers from
+	// devices IT paired (strangers must not extract punch candidates).
+	offer.RelayTS, offer.RelaySig = relay.SignPunchDelivery(d.nodeID, offer.Peer)
+	offer.RelayNode = d.nodeID.HexID()
 	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
 		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "target unreachable: " + err.Error()})
@@ -541,8 +617,13 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 		d.handlePunchRelay(ctl, first)
 		return
 	}
+	if first.Fam == send.Fam {
+		d.handleSend(ctl, first, peerHex)
+		return
+	}
 	eng := lrmsync.New(d.repo)
-	eng.AdvertiseFams = []string{relay.Fam, punch.FamName}
+	eng.BWLimit = bwlimitEnv()
+	eng.AdvertiseFams = []string{relay.Fam, punch.FamName, send.Fam}
 	eng.OnHello = func(user, node string) {
 		if user != "" {
 			pc.remoteUser = user
@@ -723,7 +804,8 @@ func (d *Daemon) serveDialer(ctx context.Context, sc *transport.SecureConn, p md
 	defer func() { d.dropPeer(pc); _ = sess.Close() }()
 	eng := lrmsync.New(d.repo)
 	eng.KeepCtl = true // persistent session: keepalive rides the ctl stream
-	eng.AdvertiseFams = []string{relay.Fam, punch.FamName}
+	eng.BWLimit = bwlimitEnv()
+	eng.AdvertiseFams = []string{relay.Fam, punch.FamName, send.Fam}
 	eng.OnHello = func(user, node string) {
 		if user != "" {
 			pc.remoteUser = user
@@ -898,17 +980,49 @@ func (d *Daemon) handleControl(conn net.Conn) {
 		}
 		writeControlJSON(conn, map[string]any{"ok": true, "stopping": true})
 		go d.stopFn()
+	case "watch":
+		// Stream every daemon event to this connection until it goes
+		// away (`lrm watch`).
+		_ = conn.SetDeadline(time.Time{})
+		writeControlJSON(conn, map[string]any{"ok": true, "watching": true})
+		ch, unsub := d.subscribeWatch()
+		defer unsub()
+		watchDone := make(chan struct{})
+		defer close(watchDone)
+		go func() { // watch for disconnect
+			buf := make([]byte, 64)
+			for {
+				if _, err := conn.Read(buf); err != nil {
+					select {
+					case <-watchDone:
+					default:
+						unsub()
+						_ = conn.Close()
+					}
+					return
+				}
+			}
+		}()
+		for msg := range ch {
+			if _, err := writeControlJSON2(conn, map[string]any{"event": msg}); err != nil {
+				return
+			}
+		}
 	default:
 		writeControlJSON(conn, map[string]any{"ok": false, "error": "unknown cmd"})
 	}
 }
 
 func writeControlJSON(conn net.Conn, v any) {
+	_, _ = writeControlJSON2(conn, v)
+}
+
+func writeControlJSON2(conn net.Conn, v any) (int, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
-		return
+		return 0, err
 	}
-	_, _ = conn.Write(append(raw, '\n'))
+	return conn.Write(append(raw, '\n'))
 }
 
 // handleRelay serves a fam=relay connect: verify the requesting device is

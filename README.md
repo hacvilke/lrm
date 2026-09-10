@@ -71,6 +71,9 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | **2.7 — WAN ladder** | TCP simultaneous-open hole punching — direct P2P through NATs, signaling relayed by a paired peer (`lrm join KEY --punch --via H:P`) | ✅ |
 | | Paired-peer relay — dial any device through an online paired peer (`--via H:P`, end-to-end encrypted, relay sees only ciphertext) | ✅ |
 | | Chunk-granular transfer resume — interrupted transfers re-fetch only missing 64 KiB blocks | ✅ |
+| | Direct file handoff — `lrm send FILE --peer H:P` (workspace-gated, SHA-256-verified, lands in `inbox/`, auto-committed) | ✅ |
+| | Bandwidth caps — `--bwlimit 512KB` on sync/join, `LRM_BWLIMIT` for the daemon | ✅ |
+| | Live event stream — `lrm watch` (mesh/sync/send events over the control socket) | ✅ |
 | **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
 | | `bisect` (DAG-correct), `ref-log`, `archive`, `shortlog`, `mv`, `~`/`^` ref suffixes | ✅ |
 | | `rebase` (linear, scratch-branch, continue/abort), `notes`, `.lrmignore`, `stash show/drop/clear`, `log --grep/--author`, GC honors ref-logs | ✅ |
@@ -146,6 +149,8 @@ workflow reversed into its LRM equivalent (`push`→`share`/`sync`,
 
 ## Architecture
 
+- [`docs/QUICKSTART.md`](docs/QUICKSTART.md) — workplace & hobby setup in ten minutes
+- [`docs/AUTOMATION.md`](docs/AUTOMATION.md) — LRS/LRQ recipes: share→join roundtrips, health checks, convergence proofs
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — system design, repo layout, data flow
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — wire protocol (handshake, mux frames, sync messages)
 - [`docs/WAN_PORTKEY_SPEC.md`](docs/WAN_PORTKEY_SPEC.md) — cross-Wi-Fi Port Key + UPnP/NAT-PMP/STUN spec

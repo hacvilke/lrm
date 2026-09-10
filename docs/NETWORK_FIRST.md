@@ -179,9 +179,16 @@ The git-compat commands keep working but stop growing. No round 7.
 
 **P3 — the network earns new abilities**
 
-9. Peer exchange (address-book gossip between paired peers).
-10. Event family → `lrm watch` output, notifications, dashboard on the control
-    socket. `lrm send` (direct file transfer) once envelopes + sessions exist.
+9. Peer exchange (address-book gossip between paired peers) — pending by
+   design: pairing is deliberate trust, and the gossip model needs its
+   own security pass before it ships.
+10. Events + direct transfer — **shipped**: `lrm watch` streams live
+    daemon events over the control socket (`{"cmd":"watch"}`), and
+    `lrm send FILE --peer H:P [--via H:P]` (fam=`send`) hands a file to
+    a peer — workspace-gated, SHA-256-verified, landed in `inbox/`,
+    auto-committed by the watcher. Transfer caps shipped too:
+    `--bwlimit 512KB` on sync/join and `LRM_BWLIMIT` for the daemon
+    (token-bucket pacing on the fetch stream).
 
 ## 6. Non-goals
 

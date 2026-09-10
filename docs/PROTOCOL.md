@@ -218,10 +218,16 @@ the relay — the same auth extras as §7 plus the offer JSON:
 ```
 
 The relay (a paired device) dials the target's daemon, delivers the
-offer line, and returns the answer line — nothing else. Punch lines on
-raw conns are prefixed `LRMPUNCH1` + JSON + `\n`; the daemon peeks the
-first bytes of every inbound conn (preamble → punch signaling, anything
-else → normal handshake via a replaying `PeekConn`).
+offer line, and returns the answer line — nothing else. **Delivery
+auth:** the relay stamps the offer with its own device signature
+(`relay_node`/`relay_ts`/`relay_sig`, ed25519 over
+`"lrm-punch-v1|<offerPeer>|<ts>"`, ±2 min) and the target verifies it
+against ITS address book before answering — a stranger who can merely
+reach the target's port never extracts punch candidates or burns its
+reserved ports. Punch lines on raw conns are prefixed `LRMPUNCH1` +
+JSON + `\n`; the daemon peeks the first bytes of every inbound conn
+(preamble → punch signaling, anything else → normal handshake via a
+replaying `PeekConn`).
 
 **Candidates.** IP selection: `LRM_PUNCH_IP` override → STUN public IP
 → first LAN address. Ports: the reserved listener ports (port
@@ -251,3 +257,25 @@ The surviving connection runs the normal handshake → mux → sync, direct
 and end-to-end. A one-shot CLI responder advertises `oneshot` in its
 hello so the initiating daemon FINs the control stream after the sync
 round instead of holding a keepalive session no one is left to answer.
+
+## 9. Direct file transfer (`internal/send`, fam=`send`)
+
+`lrm send <file> --peer H:P [--via H:P]` hands a single file to a peer
+without any repo choreography:
+
+```
+sender                                   receiver (daemon)
+  |-- stream 1: {"fam":"send","type":"offer",
+  |             "extra":{name,size,sha256,ws}}      |
+  |<---------------- {"type":"ready"} --------------|   (workspace gate passed)
+  |-- u64 BE size || raw file bytes ==================>   (streamed)
+  |<---------------- {"type":"done","extra":{name}} --|   (sha256 verified)
+```
+
+- **Workspace gate**: the offer carries the sender's workspace id; a
+  mismatch is refused with an `error` before any byte moves (same
+  mesh-scoping rule as sync).
+- **Integrity**: SHA-256 over the whole file, verified before the file
+  is placed; size is capped at 1 GiB.
+- **Landing**: `<repo>/inbox/<name>` (collisions become `name-1.ext`);
+  the receiver's watcher auto-commits it.

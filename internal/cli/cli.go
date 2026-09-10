@@ -2,6 +2,8 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -28,6 +30,7 @@ import (
 	"github.com/lrm-project/lrm/internal/portkey"
 	"github.com/lrm-project/lrm/internal/punch"
 	"github.com/lrm-project/lrm/internal/relay"
+	"github.com/lrm-project/lrm/internal/send"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
 	"github.com/lrm-project/lrm/internal/sync"
@@ -70,6 +73,10 @@ func Run(argv []string) int {
 		err = cmdJoin(args)
 	case "sync":
 		err = cmdSync(args)
+	case "send":
+		err = cmdSend(args)
+	case "watch":
+		err = cmdWatch(args)
 	case "daemon", "d":
 		err = cmdDaemon(args)
 	case "pair":
@@ -189,7 +196,10 @@ P2P mesh:
   share [--port PORT] [--no-upnp] [--no-natpmp] [--lifetime SEC]
                                             map router port + print Port Key
   join <PORTKEY> [--init]                   connect via Port Key + sync
-  sync [--peer HOST:PORT]                   sync with LAN peers (or one peer)
+  sync [--peer HOST:PORT] [--via H:P] [--bwlimit 2MB]
+                                            sync with LAN peers (or one peer)
+  send <FILE> --peer HOST:PORT [--via H:P]  hand a file to a peer (lands in inbox/)
+  watch                                    stream live daemon events (Ctrl-C to stop)
   daemon [--port PORT]                      run background engine (watch+sync)
 
 Git-reverse compat (git spellings, P2P standing):
@@ -581,6 +591,41 @@ type daemonPeer struct {
 	State string `json:"state"`
 	Since string `json:"since"`
 	RTTms int64  `json:"rtt_ms"`
+}
+
+// cmdWatch streams live daemon events (mesh, sync, watch, send) from the
+// control socket until the daemon stops or the user hits Ctrl-C.
+func cmdWatch(args []string) error {
+	_ = args
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	path := filepath.Join(r.LrmDir, "daemon.sock")
+	conn, err := net.DialTimeout("unix", path, 900*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("daemon not running (start it: lrm daemon)")
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(`{"cmd":"watch"}` + "\n")); err != nil {
+		return err
+	}
+	fmt.Println("watching daemon events — Ctrl-C to stop")
+	rd := bufio.NewReader(conn)
+	for {
+		line, err := rd.ReadBytes('\n')
+		if err != nil {
+			return nil // daemon stopped
+		}
+		var ev struct {
+			Event string `json:"event"`
+		}
+		if json.Unmarshal(bytes.TrimSpace(line), &ev) != nil || ev.Event == "" {
+			continue
+		}
+		fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), ev.Event)
+	}
 }
 
 // queryDaemon asks the running daemon over .lrm/daemon.sock.
@@ -1425,6 +1470,7 @@ func cmdJoin(args []string) error {
 	initFlag, args := hasFlag(args, "--init")
 	viaAddr, args := flagVal(args, "--via")
 	punchFlag, args := hasFlag(args, "--punch")
+	bwFlag, args := flagVal(args, "--bwlimit")
 	if len(args) == 0 {
 		return fmt.Errorf("usage: lrm join <portkey> [--init] [--via H:P] [--punch]")
 	}
@@ -1508,6 +1554,7 @@ func cmdJoin(args []string) error {
 	sess := mux.NewSession(sc, true)
 	defer sess.Close()
 	eng := sync.New(r)
+	eng.BWLimit = bwlimit(bwFlag)
 	res, err := eng.SyncWithSession(sess, true, "")
 	if err != nil {
 		return fmt.Errorf("sync failed: %w", err)
@@ -1518,6 +1565,92 @@ func cmdJoin(args []string) error {
 		fmt.Printf("conflict branch: %s (your work untouched; merge when ready)\n", res.ConflictBranch)
 	}
 	return nil
+}
+
+// parseByteSize parses "512KB", "2MB", "1.5GB" (also plain bytes).
+func parseByteSize(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(s, "KB"):
+		mult, s = 1024, strings.TrimSuffix(s, "KB")
+	case strings.HasSuffix(s, "MB"):
+		mult, s = 1024*1024, strings.TrimSuffix(s, "MB")
+	case strings.HasSuffix(s, "GB"):
+		mult, s = 1024*1024*1024, strings.TrimSuffix(s, "GB")
+	}
+	s = strings.TrimSpace(s)
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f < 0 {
+		return 0, fmt.Errorf("bad size %q (want like 512KB, 2MB)", s)
+	}
+	return int64(f * float64(mult)), nil
+}
+
+// bwlimit resolves the transfer rate cap: --bwlimit flag wins, then the
+// LRM_BWLIMIT env var; 0 = uncapped.
+func bwlimit(flagValStr string) int64 {
+	if flagValStr != "" {
+		if n, err := parseByteSize(flagValStr); err == nil {
+			return n
+		}
+	}
+	if s := os.Getenv("LRM_BWLIMIT"); s != "" {
+		if n, err := parseByteSize(s); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// cmdSend hands a single file to a peer (fam=send): workspace-gated,
+// hash-verified, lands in the peer's inbox/ where its watcher commits it.
+func cmdSend(args []string) error {
+	peerAddr, args := flagVal(args, "--peer")
+	viaAddr, args := flagVal(args, "--via")
+	if len(args) == 0 || peerAddr == "" {
+		return fmt.Errorf("usage: lrm send <FILE> --peer HOST:PORT [--via H:P]")
+	}
+	path := args[0]
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("cannot send %s: %w", path, err)
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	var sc *transport.SecureConn
+	if viaAddr != "" {
+		nodeID, nerr := node.LoadOrCreateIdentity()
+		if nerr != nil {
+			return fmt.Errorf("device identity unavailable: %w", nerr)
+		}
+		sc, err = relay.Connect(ctx, viaAddr, peerAddr, r.Identity, nodeID, nil)
+	} else {
+		sc, err = transport.Dial(ctx, peerAddr, r.Identity, r.Identity.Pub, nil)
+	}
+	if err != nil {
+		return fmt.Errorf("dial failed: %w", err)
+	}
+	defer sc.Close()
+	fmt.Printf("sending %s to %s%s...\n", filepath.Base(path), peerAddr, viaSuffix(viaAddr))
+	sess := mux.NewSession(sc, true)
+	defer sess.Close()
+	res, err := send.SendFile(sess, path, r.Config.Workspace)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("sent ✓ %s (%d bytes) — peer received it as inbox/%s\n", filepath.Base(path), res.Size, res.Name)
+	return nil
+}
+
+func viaSuffix(via string) string {
+	if via == "" {
+		return ""
+	}
+	return " via relay " + via
 }
 
 // punchIP picks the candidate IP for punching: LRM_PUNCH_IP override,
@@ -1650,6 +1783,7 @@ func punchJoin(r *store.Repo, key *portkey.LrmPortKey, viaAddr string) (*sync.Sy
 func cmdSync(args []string) error {
 	peerAddr, _ := flagVal(args, "--peer")
 	viaAddr, _ := flagVal(args, "--via")
+	bwFlag, _ := flagVal(args, "--bwlimit")
 	r, err := openRepo()
 	if err != nil {
 		return err
@@ -1699,6 +1833,7 @@ func cmdSync(args []string) error {
 		}
 		sess := mux.NewSession(sc, true)
 		eng := sync.New(r)
+		eng.BWLimit = bwlimit(bwFlag)
 		res, err := eng.SyncWithSession(sess, true, "")
 		_ = sess.Close()
 		_ = sc.Close()

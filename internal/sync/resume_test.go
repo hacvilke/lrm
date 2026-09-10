@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	stdsync "sync"
 	"testing"
+	"time"
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/chunker"
@@ -244,4 +245,49 @@ func TestSyncRepeatPushesNothing(t *testing.T) {
 	if second.Message != "already up to date" {
 		t.Fatalf("repeat sync message: %q", second.Message)
 	}
+}
+
+// TestSyncBandwidthCap locks the --bwlimit pacing: a capped fetch takes
+// at least bytes/rate (minus scheduling slop) and still arrives intact.
+func TestSyncBandwidthCap(t *testing.T) {
+	a := mkRepo(t, "alice")
+	// Four DISTINCT 64 KiB chunks (identical filler would dedup to one).
+	big := bytes.Join([][]byte{blk('w', 64<<10), blk('x', 64<<10), blk('y', 64<<10), blk('z', 64<<10)}, nil)
+	bigCommit(t, a, big, "big")
+	b := mkRepo(t, "bob")
+
+	pa, pb := net.Pipe()
+	sessA := mux.NewSession(pa, false)
+	sessB := mux.NewSession(pb, true)
+	defer sessA.Close()
+	defer sessB.Close()
+	var wg stdsync.WaitGroup
+	wg.Add(2)
+	var errB error
+	start := time.Now()
+	go func() {
+		defer wg.Done()
+		_, _ = New(a).SyncWithSession(sessA, false, "")
+	}()
+	go func() {
+		defer wg.Done()
+		eng := New(b)
+		eng.BWLimit = 128 * 1024 // 128 KB/s
+		_, errB = eng.SyncWithSession(sessB, true, "")
+	}()
+	wg.Wait()
+	elapsed := time.Since(start)
+	if errB != nil {
+		t.Fatalf("capped sync: %v", errB)
+	}
+	got, err := os.ReadFile(filepath.Join(b.Root, "big.bin"))
+	if err != nil || !bytes.Equal(got, big) {
+		t.Fatalf("big.bin corrupted (err=%v len=%d)", err, len(got))
+	}
+	// ~300+ KiB of objects at 128 KB/s needs >2s; uncapped loopback
+	// finishes in milliseconds. Assert a floor well below the ideal.
+	if elapsed < 700*time.Millisecond {
+		t.Fatalf("transfer finished in %s — pacing not applied", elapsed)
+	}
+	t.Logf("capped transfer of ~300 KiB at 128 KB/s took %s", elapsed)
 }
