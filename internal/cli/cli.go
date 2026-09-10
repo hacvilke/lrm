@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/lrm-project/lrm/internal/node"
 	"github.com/lrm-project/lrm/internal/patch"
 	"github.com/lrm-project/lrm/internal/portkey"
+	"github.com/lrm-project/lrm/internal/punch"
 	"github.com/lrm-project/lrm/internal/relay"
 	"github.com/lrm-project/lrm/internal/store"
 	"github.com/lrm-project/lrm/internal/stun"
@@ -1422,8 +1424,9 @@ func wsBytes(wsHex string) []byte {
 func cmdJoin(args []string) error {
 	initFlag, args := hasFlag(args, "--init")
 	viaAddr, args := flagVal(args, "--via")
+	punchFlag, args := hasFlag(args, "--punch")
 	if len(args) == 0 {
-		return fmt.Errorf("usage: lrm join <portkey> [--init] [--via H:P]")
+		return fmt.Errorf("usage: lrm join <portkey> [--init] [--via H:P] [--punch]")
 	}
 	keyStr := args[0]
 	key, err := portkey.Decode(keyStr)
@@ -1465,6 +1468,21 @@ func cmdJoin(args []string) error {
 			}
 		}
 	}
+	if punchFlag {
+		if viaAddr == "" {
+			return fmt.Errorf("--punch needs --via H:P (a paired device relays the signaling)")
+		}
+		res, err := punchJoin(r, key, viaAddr)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("punched ✓ sync complete: fetched=%d pushed=%d\n", res.Fetched, res.Pushed)
+		fmt.Printf("result: %s\n", res.Message)
+		if res.ConflictBranch != "" {
+			fmt.Printf("conflict branch: %s (your work untouched; merge when ready)\n", res.ConflictBranch)
+		}
+		return nil
+	}
 	if viaAddr != "" {
 		fmt.Printf("dialing %s (peer %x) via relay %s...\n", key.Addr(), key.PeerID[:4], viaAddr)
 	} else {
@@ -1500,6 +1518,133 @@ func cmdJoin(args []string) error {
 		fmt.Printf("conflict branch: %s (your work untouched; merge when ready)\n", res.ConflictBranch)
 	}
 	return nil
+}
+
+// punchIP picks the candidate IP for punching: LRM_PUNCH_IP override,
+// STUN public IP, or first LAN address.
+func punchIP() net.IP {
+	if s := os.Getenv("LRM_PUNCH_IP"); s != "" {
+		if ip := net.ParseIP(s); ip != nil {
+			return ip
+		}
+	}
+	if ip, err := stun.DiscoverPublicIP(nil, 4*time.Second); err == nil && ip != nil {
+		return ip
+	}
+	if addrs := mdns.LocalAddrs(); len(addrs) > 0 {
+		return net.ParseIP(addrs[0])
+	}
+	return net.ParseIP("127.0.0.1")
+}
+
+// punchJoin dials a Port Key peer via TCP simultaneous-open hole punching:
+// candidates are exchanged through a paired-peer relay (signaling only —
+// data flows direct), then both sides spray each other's candidates. The
+// peer with the lower PeerID dials; the other accepts.
+func punchJoin(r *store.Repo, key *portkey.LrmPortKey, viaAddr string) (*sync.SyncResult, error) {
+	nodeID, err := node.LoadOrCreateIdentity()
+	if err != nil {
+		return nil, fmt.Errorf("device identity unavailable: %w", err)
+	}
+	reserved, err := punch.Reserve(3, punchIP())
+	if err != nil {
+		return nil, fmt.Errorf("reserve punch ports: %w", err)
+	}
+	defer reserved.Close()
+
+	offerJSON, err := json.Marshal(punch.Offer{
+		Peer: r.Identity.HexID(), Pub: r.Identity.HexPub(),
+		Cands: reserved.Cands(), WS: r.Config.Workspace, User: r.Config.User,
+	})
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("punch: %d candidate(s) ready — signaling via %s\n", len(reserved.Cands()), viaAddr)
+
+	// Signaling through the relay (a few hundred bytes; data never flows via it).
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	scRelay, err := transport.Dial(ctx, viaAddr, r.Identity, r.Identity.Pub, nil)
+	if err != nil {
+		return nil, fmt.Errorf("dial relay %s: %w", viaAddr, err)
+	}
+	sigSess := mux.NewSession(scRelay, true)
+	defer sigSess.Close()
+	st, err := sigSess.OpenStream()
+	if err != nil {
+		return nil, err
+	}
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	authMsg := "lrm-relay-v1|" + key.Addr() + "|" + ts
+	sig := ed25519.Sign(nodeID.Priv, []byte(authMsg))
+	req := sync.Msg{
+		Fam: punch.FamName, Type: "connect",
+		Extra: map[string]string{
+			"target": key.Addr(),
+			"node":   nodeID.HexID(),
+			"ts":     ts,
+			"sig":    hex.EncodeToString(sig),
+			"offer":  string(offerJSON),
+		},
+	}
+	if err := sync.WriteMsg(st, req); err != nil {
+		return nil, err
+	}
+	resp, err := sync.ReadMsg(st)
+	if err != nil {
+		return nil, fmt.Errorf("punch signaling: %w", err)
+	}
+	if resp.Type != "answer" {
+		if resp.Error != "" {
+			return nil, fmt.Errorf("punch refused: %s", resp.Error)
+		}
+		return nil, fmt.Errorf("punch signaling failed (type %q)", resp.Type)
+	}
+	answer, err := punch.ParseLine([]byte(resp.Extra["answer"]))
+	if err != nil {
+		return nil, fmt.Errorf("bad punch answer: %w", err)
+	}
+	if answer.Peer != fmt.Sprintf("%x", key.PeerID) {
+		return nil, fmt.Errorf("punch answer is from a different peer — aborting")
+	}
+	fmt.Printf("punch: peer answered with %d candidate(s)\n", len(answer.Cands))
+
+	// Tie-break: lower PeerID dials.
+	if r.Identity.HexID() < answer.Peer {
+		fmt.Println("punch: we dial (lower peer id) — spraying...")
+		conn, err := reserved.PunchDial(ctx, answer.Cands, 12*time.Second)
+		if err != nil {
+			return nil, fmt.Errorf("punch dial failed (relay fallback: lrm join <key> --via %s): %w", viaAddr, err)
+		}
+		sc, err := transport.HandshakeOver(conn, r.Identity, r.Identity.Pub, key.PeerID)
+		if err != nil {
+			return nil, fmt.Errorf("handshake over punched conn: %w", err)
+		}
+		defer sc.Close()
+		sess := mux.NewSession(sc, true)
+		defer sess.Close()
+		return sync.New(r).SyncWithSession(sess, true, "")
+	}
+	// Responder side: validate conns by running the real handshake.
+	fmt.Println("punch: peer dials (higher peer id) — standing by...")
+	var winner *transport.SecureConn
+	_, perr := reserved.PunchAccept(ctx, answer.Cands, 12*time.Second, func(c net.Conn) bool {
+		sc, err := transport.AcceptOver(c, r.Identity, r.Identity.Pub)
+		if err != nil {
+			return false
+		}
+		winner = sc
+		return true
+	})
+	if perr != nil || winner == nil {
+		return nil, fmt.Errorf("punch accept failed (relay fallback: lrm join <key> --via %s): %v", viaAddr, perr)
+	}
+	defer winner.Close()
+	sess := mux.NewSession(winner, false)
+	defer sess.Close()
+	eng := sync.New(r)
+	eng.OneShot = true // CLI exits after this round; initiator FINs ctl
+	return eng.SyncWithSession(sess, false, "")
 }
 
 func cmdSync(args []string) error {

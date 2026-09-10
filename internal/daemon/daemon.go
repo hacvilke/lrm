@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
 	"github.com/lrm-project/lrm/internal/node"
+	"github.com/lrm-project/lrm/internal/punch"
 	"github.com/lrm-project/lrm/internal/relay"
 	"github.com/lrm-project/lrm/internal/staging"
 	"github.com/lrm-project/lrm/internal/store"
@@ -307,7 +309,7 @@ func (d *Daemon) acceptLoop(ctx context.Context) {
 			return
 		default:
 		}
-		sc, err := d.ln.Accept()
+		raw, err := d.ln.AcceptRaw()
 		if err != nil {
 			select {
 			case <-ctx.Done():
@@ -316,8 +318,181 @@ func (d *Daemon) acceptLoop(ctx context.Context) {
 				continue
 			}
 		}
-		go d.handleInbound(sc)
+		go d.handleRawConn(raw)
 	}
+}
+
+// handleRawConn peeks the first bytes: a punch signaling line starts
+// with the ASCII preamble; anything else is a normal LRM handshake
+// (replayed via PeekConn).
+func (d *Daemon) handleRawConn(raw net.Conn) {
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
+	hdr := make([]byte, len(punch.Preamble))
+	n, err := io.ReadFull(raw, hdr)
+	if err != nil && n == 0 {
+		_ = raw.Close()
+		return
+	}
+	if n == len(punch.Preamble) && bytes.Equal(hdr, []byte(punch.Preamble)) {
+		_ = raw.SetDeadline(time.Time{})
+		d.handlePunchSignal(raw)
+		return
+	}
+	rc := transport.NewPeekConn(raw, hdr[:n])
+	sc, err := d.ln.ServerHandshake(rc)
+	if err != nil {
+		_ = raw.Close()
+		return
+	}
+	d.handleInbound(sc)
+}
+
+// punchIP picks the advertised candidate IP: LRM_PUNCH_IP override,
+// STUN public IP, or the first LAN address.
+func punchIP() net.IP {
+	if s := os.Getenv("LRM_PUNCH_IP"); s != "" {
+		if ip := net.ParseIP(s); ip != nil {
+			return ip
+		}
+	}
+	if ip, err := stun.DiscoverPublicIP(nil, 4*time.Second); err == nil && ip != nil {
+		return ip
+	}
+	if addrs := mdns.LocalAddrs(); len(addrs) > 0 {
+		return net.ParseIP(addrs[0])
+	}
+	return net.ParseIP("127.0.0.1")
+}
+
+// handlePunchSignal answers a punch offer and runs the punch: reserve
+// candidates, reply with our own, tie-break roles (lower PeerID dials),
+// and run the full LRM session over the punched socket.
+func (d *Daemon) handlePunchSignal(raw net.Conn) {
+	// The preamble was consumed by the peek in handleRawConn — re-prepend
+	// it so ParseLine sees a full punch line.
+	_ = raw.SetReadDeadline(time.Now().Add(10 * time.Second))
+	rd := bufio.NewReader(raw)
+	line, rerr := rd.ReadBytes('\n')
+	_ = raw.SetReadDeadline(time.Time{})
+	if rerr != nil {
+		_ = raw.Close()
+		return
+	}
+	offer, err := punch.ParseLine(append([]byte(punch.Preamble), line...))
+	if err != nil {
+		_ = raw.Close()
+		return
+	}
+	res, err := punch.Reserve(3, punchIP())
+	if err != nil {
+		_ = raw.Close()
+		return
+	}
+	defer res.Close()
+	answer := punch.Offer{
+		Peer: d.repo.Identity.HexID(), Pub: d.repo.Identity.HexPub(),
+		Cands: res.Cands(), WS: d.repo.Config.Workspace, User: d.repo.Config.User,
+	}
+	if _, err := raw.Write(punch.EncodeLine(answer)); err != nil {
+		return
+	}
+	_ = raw.Close() // signaling done
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	iAmInitiator := d.repo.Identity.HexID() < offer.Peer
+	role := "peer dials"
+	if iAmInitiator {
+		role = "we dial"
+	}
+	d.event("punch: signaling with %s (%d candidate(s) each, %s)", peerName(offer), len(offer.Cands), role)
+	if iAmInitiator {
+		conn, err := res.PunchDial(ctx, offer.Cands, 10*time.Second)
+		if err != nil {
+			d.event("punch: dial failed (%v) — peer can retry or use the relay", err)
+			return
+		}
+		var expect []byte
+		if pub := mustHex(offer.Pub); len(pub) == 32 {
+			expect = peerIDOf(pub)
+		}
+		sc, err := transport.HandshakeOver(conn, d.repo.Identity, d.repo.Identity.Pub, expect)
+		if err != nil {
+			d.event("punch: handshake failed (%v)", err)
+			return
+		}
+		d.serveDialer(ctx, sc, mdns.Peer{PeerHex: offer.Peer, SeenAt: time.Now(), Source: "punch", WS: offer.WS, User: peerName(offer)})
+		return
+	}
+	// Responder: validate accepted conns by running the real handshake —
+	// the initiator's losing parallel dials land here and die instantly.
+	var winner *transport.SecureConn
+	_, err = res.PunchAccept(ctx, offer.Cands, 10*time.Second, func(c net.Conn) bool {
+		sc, err := transport.AcceptOver(c, d.repo.Identity, d.repo.Identity.Pub)
+		if err != nil {
+			return false
+		}
+		winner = sc
+		return true
+	})
+	if err != nil || winner == nil {
+		d.event("punch: no incoming connection (%v)", err)
+		return
+	}
+	d.event("punch: connected to %s", peerName(offer))
+	d.handleInbound(winner)
+}
+
+// peerName renders an offer's display name.
+func peerName(o punch.Offer) string {
+	if o.User != "" {
+		return o.User
+	}
+	if len(o.Peer) > 8 {
+		return o.Peer[:8]
+	}
+	return o.Peer
+}
+
+// handlePunchRelay relays punch signaling: an authenticated paired device
+// asks us to deliver a punch offer to a target; we exchange the two
+// signaling lines and return the answer. Data never flows through us —
+// only these few hundred bytes.
+func (d *Daemon) handlePunchRelay(ctl *mux.Stream, m lrmsync.Msg) {
+	target, err := relay.CheckAuth(m.Extra, d.book)
+	if err != nil {
+		d.event("punch relay refused: %v", err)
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: err.Error()})
+		return
+	}
+	offer, err := punch.ParsePayload([]byte(m.Extra["offer"]))
+	if err != nil {
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "bad offer: " + err.Error()})
+		return
+	}
+	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "target unreachable: " + err.Error()})
+		return
+	}
+	defer dst.Close()
+	_ = dst.SetDeadline(time.Now().Add(20 * time.Second))
+	if _, err := dst.Write(punch.EncodeLine(offer)); err != nil {
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "offer delivery failed"})
+		return
+	}
+	rd := bufio.NewReader(dst)
+	line, err := rd.ReadBytes('\n')
+	if err != nil {
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "no answer from target"})
+		return
+	}
+	if _, err := punch.ParseLine(line); err != nil {
+		_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "error", Error: "bad answer from target"})
+		return
+	}
+	d.event("punch signaling delivered: %s -> %s", shortNodeHex(m.Extra["node"]), target)
+	_ = lrmsync.WriteMsg(ctl, lrmsync.Msg{Fam: punch.FamName, Type: "answer", Extra: map[string]string{"answer": string(line)}})
 }
 
 func (d *Daemon) handleInbound(sc *transport.SecureConn) {
@@ -362,8 +537,12 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 		d.handleRelay(ctl, first)
 		return
 	}
+	if first.Fam == punch.FamName {
+		d.handlePunchRelay(ctl, first)
+		return
+	}
 	eng := lrmsync.New(d.repo)
-	eng.AdvertiseFams = []string{relay.Fam}
+	eng.AdvertiseFams = []string{relay.Fam, punch.FamName}
 	eng.OnHello = func(user, node string) {
 		if user != "" {
 			pc.remoteUser = user
@@ -515,6 +694,13 @@ func (d *Daemon) dialPeer(ctx context.Context, p mdns.Peer) {
 	if err != nil {
 		return
 	}
+	d.serveDialer(ctx, sc, p)
+}
+
+// serveDialer runs the full dialer-side session lifecycle on an
+// established secure conn (discovery dial, punched socket, relay pipe).
+func (d *Daemon) serveDialer(ctx context.Context, sc *transport.SecureConn, p mdns.Peer) {
+	addr := p.Addr()
 	peerHex := fmt.Sprintf("%x", sc.Remote.PeerID)
 	if existing, exists := d.peers.Load(peerHex); exists {
 		if !d.shouldReplace(existing.(*peerConn), d.repo.Identity.HexID()) {
@@ -537,7 +723,7 @@ func (d *Daemon) dialPeer(ctx context.Context, p mdns.Peer) {
 	defer func() { d.dropPeer(pc); _ = sess.Close() }()
 	eng := lrmsync.New(d.repo)
 	eng.KeepCtl = true // persistent session: keepalive rides the ctl stream
-	eng.AdvertiseFams = []string{relay.Fam}
+	eng.AdvertiseFams = []string{relay.Fam, punch.FamName}
 	eng.OnHello = func(user, node string) {
 		if user != "" {
 			pc.remoteUser = user

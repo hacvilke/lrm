@@ -67,21 +67,28 @@ func DiscoverPublicIP(servers []string, timeout time.Duration) (net.IP, error) {
 // Query sends a single binding request to addr (host:port) and parses the
 // XOR-MAPPED-ADDRESS / MAPPED-ADDRESS response.
 func Query(addr string, timeout time.Duration) (net.IP, error) {
+	ip, _, err := QueryEndpoint(addr, timeout)
+	return ip, err
+}
+
+// QueryEndpoint is Query but also returns the mapped PORT — the reflexive
+// endpoint (ip:port) a hole-punch candidate needs.
+func QueryEndpoint(addr string, timeout time.Duration) (net.IP, int, error) {
 	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", addr, err)
+		return nil, 0, fmt.Errorf("resolve %s: %w", addr, err)
 	}
 	conn, err := net.DialUDP("udp", nil, raddr)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer conn.Close()
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	txn := make([]byte, 12)
 	if _, err := rand.Read(txn); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req := make([]byte, 20)
 	binary.BigEndian.PutUint16(req[0:2], msgBindingRequest)
@@ -89,31 +96,31 @@ func Query(addr string, timeout time.Duration) (net.IP, error) {
 	binary.BigEndian.PutUint32(req[4:8], magicCookie)
 	copy(req[8:20], txn)
 	if _, err := conn.Write(req); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	buf := make([]byte, 1500)
 	n, err := conn.Read(buf)
 	if err != nil {
-		return nil, fmt.Errorf("stun read %s: %w", addr, err)
+		return nil, 0, fmt.Errorf("stun read %s: %w", addr, err)
 	}
 	return parseResponse(buf[:n], txn)
 }
 
-func parseResponse(p []byte, txn []byte) (net.IP, error) {
+func parseResponse(p []byte, txn []byte) (net.IP, int, error) {
 	if len(p) < 20 {
-		return nil, fmt.Errorf("short STUN response (%d bytes)", len(p))
+		return nil, 0, fmt.Errorf("short STUN response (%d bytes)", len(p))
 	}
 	msgType := binary.BigEndian.Uint16(p[0:2])
 	if msgType != msgBindingResponse {
-		return nil, fmt.Errorf("unexpected STUN type 0x%04x", msgType)
+		return nil, 0, fmt.Errorf("unexpected STUN type 0x%04x", msgType)
 	}
 	if binary.BigEndian.Uint32(p[4:8]) != magicCookie {
-		return nil, fmt.Errorf("bad STUN magic cookie")
+		return nil, 0, fmt.Errorf("bad STUN magic cookie")
 	}
 	// Transaction ID must match (prevents off-path spoofing).
 	for i := 0; i < 12; i++ {
 		if p[8+i] != txn[i] {
-			return nil, fmt.Errorf("STUN transaction mismatch")
+			return nil, 0, fmt.Errorf("STUN transaction mismatch")
 		}
 	}
 	off := 20
@@ -122,66 +129,67 @@ func parseResponse(p []byte, txn []byte) (net.IP, error) {
 		attrLen := int(binary.BigEndian.Uint16(p[off+2 : off+4]))
 		val := p[off+4:]
 		if len(val) < attrLen {
-			return nil, fmt.Errorf("truncated STUN attribute")
+			return nil, 0, fmt.Errorf("truncated STUN attribute")
 		}
 		val = val[:attrLen]
 		switch attrType {
 		case attrXorMapped:
-			if ip, err := parseXorMapped(val, p[4:8], p[8:20]); err == nil {
-				return ip, nil
+			if ip, port, err := parseXorMapped(val, p[4:8], p[8:20]); err == nil {
+				return ip, port, nil
 			}
 		case attrMappedAddress:
-			if ip, err := parseMapped(val); err == nil {
-				return ip, nil
+			if ip, port, err := parseMapped(val); err == nil {
+				return ip, port, nil
 			}
 		}
 		// Attributes are 32-bit padded.
 		off += 4 + (attrLen+3)/4*4
 	}
-	return nil, fmt.Errorf("no mapped address in STUN response")
+	return nil, 0, fmt.Errorf("no mapped address in STUN response")
 }
 
-func parseXorMapped(val, cookie, txn []byte) (net.IP, error) {
+func parseXorMapped(val, cookie, txn []byte) (net.IP, int, error) {
 	if len(val) < 8 {
-		return nil, fmt.Errorf("short XOR-MAPPED-ADDRESS")
+		return nil, 0, fmt.Errorf("short XOR-MAPPED-ADDRESS")
 	}
 	family := val[1]
 	xPort := binary.BigEndian.Uint16(val[2:4])
-	_ = xPort
+	port := int(xPort ^ binary.BigEndian.Uint16(cookie[0:2]))
 	if family == 0x01 { // IPv4
 		if len(val) < 8 {
-			return nil, fmt.Errorf("short IPv4 address")
+			return nil, 0, fmt.Errorf("short IPv4 address")
 		}
 		ip := make(net.IP, 4)
 		for i := 0; i < 4; i++ {
 			ip[i] = val[4+i] ^ cookie[i]
 		}
-		return ip, nil
+		return ip, port, nil
 	}
 	if family == 0x02 { // IPv6
 		if len(val) < 20 {
-			return nil, fmt.Errorf("short IPv6 address")
+			return nil, 0, fmt.Errorf("short IPv6 address")
 		}
 		mask := append(append([]byte{}, cookie...), txn...)
 		ip := make(net.IP, 16)
 		for i := 0; i < 16; i++ {
 			ip[i] = val[4+i] ^ mask[i]
 		}
-		return ip, nil
+		return ip, port, nil
 	}
-	return nil, fmt.Errorf("unknown address family %d", family)
+	return nil, 0, fmt.Errorf("unknown address family %d", family)
 }
 
-func parseMapped(val []byte) (net.IP, error) {
+func parseMapped(val []byte) (net.IP, int, error) {
 	if len(val) < 8 {
-		return nil, fmt.Errorf("short MAPPED-ADDRESS")
+		return nil, 0, fmt.Errorf("short MAPPED-ADDRESS")
 	}
 	family := val[1]
+	port := int(binary.BigEndian.Uint16(val[2:4]))
 	if family == 0x01 {
-		return net.IP(val[4:8]), nil
+		return net.IP(val[4:8]), port, nil
 	}
 	if family == 0x02 && len(val) >= 20 {
-		return net.IP(val[4:20]), nil
+		return net.IP(val[4:20]), port, nil
 	}
-	return nil, fmt.Errorf("unknown family %d", family)
+	return nil, 0, fmt.Errorf("unknown family %d", family)
 }

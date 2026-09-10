@@ -51,44 +51,51 @@ func VerifyRequest(m sync.Msg, book *node.Book) (string, error) {
 	if m.Fam != Fam || m.Type != "connect" {
 		return "", fmt.Errorf("not a relay connect message")
 	}
-	target := strings.TrimSpace(m.Extra["target"])
+	return CheckAuth(m.Extra, book)
+}
+
+// CheckAuth validates the shared auth extras (target/node/ts/sig signed
+// by the device key) against the address book. Used by both the relay
+// and the punch-signaling handlers.
+func CheckAuth(extra map[string]string, book *node.Book) (string, error) {
+	target := strings.TrimSpace(extra["target"])
 	if target == "" {
-		return "", fmt.Errorf("relay request missing target")
+		return "", fmt.Errorf("request missing target")
 	}
 	if host, port, err := net.SplitHostPort(target); err != nil || host == "" || port == "" {
-		return "", fmt.Errorf("relay target must be host:port")
+		return "", fmt.Errorf("target must be host:port")
 	}
-	nodeHex := m.Extra["node"]
-	tsStr := m.Extra["ts"]
-	sigHex := m.Extra["sig"]
+	nodeHex := extra["node"]
+	tsStr := extra["ts"]
+	sigHex := extra["sig"]
 	if nodeHex == "" || tsStr == "" || sigHex == "" {
-		return "", fmt.Errorf("relay request missing auth fields")
+		return "", fmt.Errorf("request missing auth fields")
 	}
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	if err != nil {
-		return "", fmt.Errorf("bad relay timestamp")
+		return "", fmt.Errorf("bad timestamp")
 	}
 	if d := time.Since(time.Unix(ts, 0)); d > maxSkew || d < -maxSkew {
-		return "", fmt.Errorf("relay request stale")
+		return "", fmt.Errorf("request stale")
 	}
 	if book == nil {
-		return "", fmt.Errorf("relay: this node has no address book")
+		return "", fmt.Errorf("no address book")
 	}
 	entry := book.Get(nodeHex)
 	if entry == nil {
-		return "", fmt.Errorf("relay: device %s is not paired", shortHex(nodeHex))
+		return "", fmt.Errorf("device %s is not paired", shortHex(nodeHex))
 	}
 	pub, err := hex.DecodeString(entry.Pub)
 	if err != nil || len(pub) != ed25519.PublicKeySize {
-		return "", fmt.Errorf("relay: pinned device key corrupt")
+		return "", fmt.Errorf("pinned device key corrupt")
 	}
 	sig, err := hex.DecodeString(sigHex)
 	if err != nil {
-		return "", fmt.Errorf("relay: bad signature encoding")
+		return "", fmt.Errorf("bad signature encoding")
 	}
 	msg := authDomain + "|" + target + "|" + tsStr
 	if !ed25519.Verify(pub, []byte(msg), sig) {
-		return "", fmt.Errorf("relay: signature check failed")
+		return "", fmt.Errorf("signature check failed")
 	}
 	return target, nil
 }

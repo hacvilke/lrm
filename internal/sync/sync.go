@@ -69,6 +69,11 @@ type Engine struct {
 	// returns so the daemon can run keepalive rounds on the same stream
 	// (the responder serves pings in its read loop). Responder side: nil.
 	Ctl *mux.Stream
+	// OneShot marks a CLI one-shot responder: the initiator is told (via
+	// the hello) to FIN the control stream after the sync round instead
+	// of keeping the session for keepalive — the CLI exits either way.
+	OneShot bool
+
 	// KeepCtl leaves the control stream open after the sync completes
 	// (daemon mode: the session stays live for keepalive rounds). One-shot
 	// callers leave it false: the stream is FIN'd so the responder's serve
@@ -154,9 +159,12 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		if err := e.serveResponder(ctl, sess, hello, res); err != nil {
 			return res, err
 		}
-		if !e.KeepCtl {
-			// One-shot: FIN the control stream so the responder's serve
-			// loop unblocks (it keeps serving after "done" for daemons).
+		// One-shot either way: we are one-shot (CLI), or the responder
+		// advertised oneshot (a CLI punch-join) — FIN the control stream
+		// so their serve loop unblocks (it keeps serving after "done"
+		// for persistent daemon sessions otherwise).
+		remoteOneshot := hello.Extra["oneshot"] == "1"
+		if !e.KeepCtl || remoteOneshot {
 			_ = ctl.Close()
 		}
 	} else {
@@ -316,6 +324,9 @@ func (e *Engine) writeHello(w io.Writer) error {
 	}
 	if e.NodePub != "" {
 		extra["nodepub"] = e.NodePub
+	}
+	if e.OneShot {
+		extra["oneshot"] = "1"
 	}
 	fams := FamSync
 	for _, f := range e.AdvertiseFams {

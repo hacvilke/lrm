@@ -236,21 +236,71 @@ func (l *Listener) Close() error { return l.ln.Close() }
 
 // Accept performs the responder handshake on the next connection.
 func (l *Listener) Accept() (*SecureConn, error) {
-	raw, err := l.ln.Accept()
+	raw, err := l.AcceptRaw()
 	if err != nil {
 		return nil, err
 	}
-	if err := raw.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+	sc, err := l.ServerHandshake(raw)
+	if err != nil {
 		_ = raw.Close()
-		return l.Accept()
+		return nil, err
+	}
+	return sc, nil
+}
+
+// AcceptRaw returns the next connection WITHOUT the LRM handshake, so
+// callers can peek at leading bytes (hole-punch signaling) and replay
+// them via PeekConn before handshaking.
+func (l *Listener) AcceptRaw() (net.Conn, error) {
+	return l.ln.Accept()
+}
+
+// ServerHandshake runs the responder handshake on an established
+// connection (possibly wrapped in a PeekConn).
+func (l *Listener) ServerHandshake(raw net.Conn) (*SecureConn, error) {
+	if err := raw.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return nil, err
 	}
 	sc, err := responderHandshake(raw, l.sign, l.pub)
 	if err != nil {
-		_ = raw.Close()
 		return nil, err
 	}
 	_ = raw.SetDeadline(time.Time{})
 	return sc, nil
+}
+
+// AcceptOver runs the responder handshake on an established connection
+// (a punched socket on the CLI side, where no Listener exists).
+func AcceptOver(raw net.Conn, sign identityIface, localPub []byte) (*SecureConn, error) {
+	if err := raw.SetDeadline(time.Now().Add(handshakeTimeout)); err != nil {
+		return nil, err
+	}
+	sc, err := responderHandshake(raw, sign, localPub)
+	if err != nil {
+		return nil, err
+	}
+	_ = raw.SetDeadline(time.Time{})
+	return sc, nil
+}
+
+// PeekConn is a net.Conn that replays bytes already read from the
+// underlying connection before passing reads through.
+type PeekConn struct {
+	net.Conn
+	buf []byte
+}
+
+// NewPeekConn wraps c, replaying buf first.
+func NewPeekConn(c net.Conn, buf []byte) *PeekConn { return &PeekConn{Conn: c, buf: buf} }
+
+// Read replays peeked bytes, then reads through.
+func (c *PeekConn) Read(p []byte) (int, error) {
+	if len(c.buf) > 0 {
+		n := copy(p, c.buf)
+		c.buf = c.buf[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
 }
 
 func genEphemeral() (*ecdh.PrivateKey, []byte, error) {

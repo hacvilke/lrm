@@ -60,7 +60,7 @@ u32 streamID || u8 flags || u32 payloadLen || payload[..]
 
 | Type | Direction | Fields | Meaning |
 |------|-----------|--------|---------|
-| `hello` | both | `peer, branch, heads[], ws, extra{user,node,nodepub}` | advertise identity + branch tips + workspace + device |
+| `hello` | both | `peer, branch, heads[], ws, extra{user,node,nodepub,oneshot?}` | advertise identity + branch tips + workspace + device; `oneshot="1"` = CLI one-shot: initiator FINs ctl after the round |
 | `ping` | dialer → peer | `heads[tip]` | keepalive; carries the dialer's tip |
 | `pong` | peer → dialer | `heads[tip]` | keepalive reply with the responder's tip |
 | `want` | → peer | `want[commitHex…]` | request commits by hash |
@@ -179,3 +179,75 @@ The daemon serves a line-JSON API on `<repo>/.lrm/daemon.sock`:
 | `{"cmd":"status"}` | `{ok, user, workspace, node, uptime_sec, peers:[{user,peer,addr,state,since,rtt_ms}]}` |
 | `{"cmd":"sync"}` | `{ok, triggered:true}` — immediate dial + keepalive nudge round |
 | `{"cmd":"stop"}` | `{ok, stopping:true}` — graceful shutdown (port mappings torn down) |
+
+## 7. Paired-peer relay (`internal/relay`, fam=`relay`)
+
+A paired, online peer can carry a connection to a third device. The relay
+sees only ciphertext — the inner handshake is end-to-end with the target.
+
+```
+client                       relay (fam="relay")                target
+  |-- mux stream: {"fam":"relay","type":"connect",    -------------->|
+  |   "extra":{target,node,ts,sig}}                    dial target (10s)
+  |<------------------ {"fam":"relay","type":"open"} --|
+  | ===== blind pipe; client runs the normal handshake with TARGET ====|
+```
+
+- `sig` = ed25519(device key) over `"lrm-relay-v1|<target>|<ts>"`,
+  timestamp fresh ±2 min, device must be in the relay's address book
+  (`lrm pair`). Unpaired devices are refused.
+- The client then speaks the §1 handshake *over the pipe*
+  (`HandshakeOver`) and pins the target's PeerID — the relay cannot
+  MITM (it has no role in the key exchange).
+- CLI: `--via H:P` on `sync` / `join` / `clone`.
+
+## 8. TCP hole punching (`internal/punch`, fam=`punch`)
+
+Two peers behind NATs open a direct TCP session via simultaneous open.
+Signaling (a few hundred bytes) rides a paired-peer relay; data flies
+direct.
+
+**Signaling.** `lrm join <portkey> --punch --via H:P` reserves 3
+`SO_REUSEPORT` listeners (the candidates) and sends
+`{"fam":"punch","type":"connect","extra":{target,node,ts,sig,offer}}` to
+the relay — the same auth extras as §7 plus the offer JSON:
+
+```
+{"peer":<hex PeerID>, "pub":<hex repo pubkey>, "cands":["ip:port",…],
+ "ws":<workspace hex>, "user":<display name>}
+```
+
+The relay (a paired device) dials the target's daemon, delivers the
+offer line, and returns the answer line — nothing else. Punch lines on
+raw conns are prefixed `LRMPUNCH1` + JSON + `\n`; the daemon peeks the
+first bytes of every inbound conn (preamble → punch signaling, anything
+else → normal handshake via a replaying `PeekConn`).
+
+**Candidates.** IP selection: `LRM_PUNCH_IP` override → STUN public IP
+→ first LAN address. Ports: the reserved listener ports (port
+preservation on the NAT is assumed; symmetric NATs fail — fall back to
+`--via`).
+
+**Roles.** Lower PeerID dials (`PunchDial`), the other accepts
+(`PunchAccept`).
+
+- *PunchDial*: spray-dial every remote candidate × every local reserved
+  port (reuseport binds, IPv4); first success wins atomically, losers
+  are closed, and the reserved listeners are torn down (closing them
+  resets the silent conns the peer's hole-openers parked there). A
+  drain goroutine also accepts-and-discards those parked conns while
+  spraying — otherwise their 4-tuples stay allocated (CLOSE_WAIT) and
+  every spray dial fails to bind.
+- *PunchAccept*: (a) accept the initiator's dials on the reserved
+  listeners, validating each concurrently — in practice by running the
+  real §1 responder handshake; dead conns EOF instantly, only the
+  winner carries bytes; (b) hole-openers dial the peer's candidates to
+  pin the NAT mappings, peek 500 ms for data: silent conns (they
+  reached a listener, not a dial socket) are closed to free the tuple,
+  data-bearing conns are TCP-simultaneous-open links to the initiator's
+  live dial and join the validator pool.
+
+The surviving connection runs the normal handshake → mux → sync, direct
+and end-to-end. A one-shot CLI responder advertises `oneshot` in its
+hello so the initiating daemon FINs the control stream after the sync
+round instead of holding a keepalive session no one is left to answer.
