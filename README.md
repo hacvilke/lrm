@@ -48,7 +48,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | **1 — Local engine** | Instant Merkle trees (parallel, streaming, single root hash) | ✅ |
 | | Immutable SHA-256 Content-Addressed Storage (Git-style fanout) | ✅ |
 | | In-Memory Virtual Staging (change watcher + instant delta diffs) | ✅ |
-| | File chunking 4KB–1MB + manifests (BitTorrent/IPFS model) | ✅ |
+| | File chunking 4KB–1MB (64 KiB default) + manifests (BitTorrent/IPFS model) | ✅ |
 | | Line diffs / unified patches, binary detection | ✅ |
 | **2 — P2P mesh** | Zero-config LAN discovery (mDNS `_lrm._tcp` + UDP broadcast) | ✅ |
 | | Workspace identity — mesh scoping: strangers on shared Wi-Fi never sync (legacy repos derive it from genesis; v2 Port Keys carry it) | ✅ |
@@ -68,6 +68,9 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | | Replication log (append-only JSONL audit trail) | ✅ |
 | | Real-time daemon (watch → auto-commit → instant dial, ~2s peer latency) | ✅ |
 | | Persistent sessions — keepalive ping/pong, RTT presence table, deterministic glare tie-break, live control socket | ✅ |
+| **2.7 — WAN ladder** | TCP simultaneous-open hole punching — direct P2P through NATs, signaling relayed by a paired peer (`lrm join KEY --punch --via H:P`) | ✅ |
+| | Paired-peer relay — dial any device through an online paired peer (`--via H:P`, end-to-end encrypted, relay sees only ciphertext) | ✅ |
+| | Chunk-granular transfer resume — interrupted transfers re-fetch only missing 64 KiB blocks | ✅ |
 | **5 — Git-reverse++** | `blame`, `cherry-pick`, `grep`, `config`, `clean`, `describe`, `amend`, `checkout -b` | ✅ |
 | | `bisect` (DAG-correct), `ref-log`, `archive`, `shortlog`, `mv`, `~`/`^` ref suffixes | ✅ |
 | | `rebase` (linear, scratch-branch, continue/abort), `notes`, `.lrmignore`, `stash show/drop/clear`, `log --grep/--author`, GC honors ref-logs | ✅ |

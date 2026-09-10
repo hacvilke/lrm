@@ -69,6 +69,10 @@ type Engine struct {
 	// returns so the daemon can run keepalive rounds on the same stream
 	// (the responder serves pings in its read loop). Responder side: nil.
 	Ctl *mux.Stream
+	// fetchedObjects counts trees/blobs/chunks moved via fetchObjects;
+	// merged into SyncResult.Fetched so resume granularity is visible.
+	fetchedObjects int
+
 	// OneShot marks a CLI one-shot responder: the initiator is told (via
 	// the hello) to FIN the control stream after the sync round instead
 	// of keeping the session for keepalive — the CLI exits either way.
@@ -178,6 +182,7 @@ func (e *Engine) SyncWithSession(sess *mux.Session, initiator bool, remoteBranch
 		}
 		return e.ServeInbound(ctl, sess, hello)
 	}
+	res.Fetched += e.fetchedObjects // commits + trees/blobs/chunks moved
 	_ = remoteBranch
 	return res, nil
 }
@@ -555,6 +560,9 @@ func (e *Engine) fetchObjects(ctl *mux.Stream, sess *mux.Session, objs []cas.Has
 	if err := writeMsg(ctl, Msg{Type: "want-objects", Objects: hexes}); err != nil {
 		return err
 	}
+	// Count every object moved over this stream (trees, blobs, chunks) —
+	// resume granularity is visible in the fetched count.
+	e.fetchedObjects += len(objs)
 	// Responder opens its own stream to us; accept it.
 	// (Simpler than addressing streams by id across sides.)
 	resp, err := sess.AcceptStream()

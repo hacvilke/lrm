@@ -8,8 +8,8 @@ Status: proposal · Sep 2026
 - [x] **P0.2 Node identity + address book + pairing** — shipped: `~/.lrm/node.key`, `peers.json`, `lrm pair` / `devices` / `unpair`, impersonation guard
 - [x] **P1.3 Persistent sessions + presence** — shipped: keepalive ping/pong, RTT presence, glare tie-break, `lrm status` live table, event-driven dial (~2s join)
 - [x] **P1.5 Daemon control** — shipped (in-repo scope): `.lrm/daemon.sock` status/sync/stop; full detach still future
-- [ ] **P1.4 Message envelopes + version negotiation** — pending (sync still speaks the legacy message set)
-- [ ] **P2 WAN ladder** — pending: UDP hole-punch, paired-peer relay, transfer resume
+- [x] **P1.4 Message envelopes + version negotiation** — shipped: `fam` field + `pv` negotiation, handler dispatch for non-sync families (wire-compatible with v1)
+- [x] **P2 WAN ladder** — shipped: TCP simultaneous-open hole-punching (`lrm join KEY --punch --via`, fam=`punch`), paired-peer relay (`--via`, fam=`relay`), chunk-granular transfer resume (64 KiB blocks, held/shared chunks skipped — proven in `internal/sync/resume_test.go`)
 - [ ] **P3 Peer exchange / events / direct send** — pending
 
 ## 1. Where the effort went
@@ -118,7 +118,7 @@ what it hosts). This is what keeps LRM from ever being "just a VCS transport".
 And one reachability ladder, tried in order for any peer:
 
 ```
-LAN mDNS  →  WAN direct (STUN)  →  UDP hole-punch  →  paired-peer relay
+LAN mDNS  →  WAN direct (STUN)  →  TCP hole-punch  →  paired-peer relay
 ```
 
 The relay hop is the important one: **any online paired peer can relay for an
@@ -174,8 +174,8 @@ The git-compat commands keep working but stop growing. No round 7.
 
 6. UDP hole-punching using the existing STUN client (ephemeral port pairs,
    simultaneous open). First non-TCP path.
-7. Paired-peer relay: dial-by-PeerID routed through an online peer.
-8. Transfer resume + bandwidth caps on bulk streams.
+7. Paired-peer relay: dial-by-PeerID routed through an online peer — **shipped** (fam=`relay`, `--via H:P`; the relay sees only ciphertext).
+8. Transfer resume + bandwidth caps on bulk streams — **resume shipped** (chunk-granular: interrupted transfers re-fetch only the missing 64 KiB blocks; `fetched=N` now counts every object moved). Bandwidth caps: future.
 
 **P3 — the network earns new abilities**
 
