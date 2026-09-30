@@ -154,7 +154,15 @@ func Serve(st *mux.Stream, m lrmsync.Msg, r *store.Repo) (*Result, error) {
 	if err := os.MkdirAll(inbox, 0o755); err != nil {
 		return nil, err
 	}
-	tmp, err := os.CreateTemp(inbox, ".send-*")
+	// Stage the incoming bytes OUTSIDE the working tree: the daemon
+	// watches the repo, and a partial .send-* file inside inbox/ would be
+	// committed as noise (or as a truncated file if the transfer dies).
+	// .lrm/tmp is already excluded from trees.
+	stage := filepath.Join(r.LrmDir, "tmp")
+	if err := os.MkdirAll(stage, 0o755); err != nil {
+		return nil, err
+	}
+	tmp, err := os.CreateTemp(stage, ".send-*")
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +193,7 @@ func Serve(st *mux.Stream, m lrmsync.Msg, r *store.Repo) (*Result, error) {
 	if err := os.Rename(tmpName, final); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(final, 0o644) // temp files are 0600; inbox files are shared
 	_ = lrmsync.WriteMsg(st, lrmsync.Msg{Fam: Fam, Type: "done",
 		Extra: map[string]string{"name": filepath.Base(final)}})
 	return &Result{Name: filepath.Base(final), Size: n, Sha256: got}, nil

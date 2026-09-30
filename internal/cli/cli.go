@@ -81,6 +81,8 @@ func Run(argv []string) int {
 		err = cmdDaemon(args)
 	case "dashboard", "dash":
 		err = cmdDashboard(args)
+	case "receive", "drop":
+		err = cmdReceive(args)
 	case "pair":
 		err = cmdPair(args)
 	case "devices":
@@ -205,6 +207,8 @@ P2P mesh:
   daemon [--port PORT] [--peer HOST:PORT]   run background engine (watch+sync)
   dashboard [--port PORT] [--host H] [--snapshot FILE] [--json]
                                             local window: peers, syncs, files
+  receive [--port PORT] [--once] [--max-size MiB]
+                                            phone-friendly upload page (inbox/)
 
 Git-reverse compat (git spellings, P2P standing):
   add [paths...]                            confirm auto-tracked paths (no-op ritual)
