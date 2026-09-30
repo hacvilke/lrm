@@ -16,8 +16,15 @@ release checksums, and installs it under your home directory — no root, no
 toolchain. Add `--dir ~/bin` to choose the location, `--source` to build
 from a checkout instead, `--from lrm` to install a binary you already have.
 
-Android (Termux): `pkg install curl && sh -c "$(curl -fsSL .../install.sh)"`
-picks the static linux/arm64 build, which runs as-is.
+**Android (Termux)** needs a different binary and a different installer —
+see [lrm-mobile](https://github.com/hacvilke/lrm-mobile). A desktop
+linux/arm64 build will not start on Android (`unexpected e_type: 2`);
+Android requires a position-independent `GOOS=android` build.
+
+```sh
+pkg install curl
+curl -fsSL https://raw.githubusercontent.com/hacvilke/lrm-mobile/main/scripts/install.sh | sh
+```
 
 ## The mental model
 
@@ -150,7 +157,9 @@ sit together anyway, regulated or offline environments.
 
 - WAN paths (punch/relay) work but assume reasonably friendly NATs;
   the relay fallback covers the rest.
-- Desktop OSes only (Linux/macOS/Windows) — no phone client.
+- Desktop OSes only here (Linux/macOS/Windows). Android/Termux is
+  supported by [lrm-mobile](https://github.com/hacvilke/lrm-mobile), which
+  wraps this engine unchanged; there is no iOS client.
 - One workspace per repo; cross-workspace sharing is `lrm send` only.
 - Peer-exchange gossip (learning addresses through friends) is designed
   but not shipped — pairing is deliberately manual today.

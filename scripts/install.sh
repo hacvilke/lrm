@@ -62,6 +62,47 @@ while [ $# -gt 0 ]; do
 done
 
 # --- what are we running on? ------------------------------------------------
+# Android first. Termux answers "Linux" to `uname -s` and "aarch64" to
+# `uname -m`, both truthfully -- Android is a Linux kernel and Termux is a
+# real Linux userland. But the C library is bionic, the loader is
+# /system/bin/linker64, and Android refuses any executable that is not
+# position-independent. The desktop linux/arm64 asset is a default Go build,
+# which is ET_EXEC, so it dies with:
+#
+#   error: "..." has unexpected e_type: 2
+#
+# Installing it anyway would leave a broken file on someone's phone, so this
+# installer stops and points at the project that builds for Android.
+is_android() {
+  [ -n "${TERMUX_VERSION:-}" ] && return 0
+  case "${PREFIX:-}" in *com.termux*) return 0 ;; esac
+  [ -d /data/data/com.termux/files/usr ] && return 0
+  command -v getprop >/dev/null 2>&1 && [ -n "$(getprop ro.build.version.release 2>/dev/null)" ] && return 0
+  [ -f /system/build.prop ] && return 0
+  [ -n "${ANDROID_ROOT:-}" ] && [ -n "${ANDROID_DATA:-}" ] && return 0
+  return 1
+}
+
+if is_android; then
+  cat >&2 <<'ANDROID'
+error: this is the desktop LRM installer, and this looks like Android/Termux.
+
+       A desktop linux/arm64 binary cannot run here. Android's loader only
+       accepts position-independent executables, so it would fail with:
+
+         has unexpected e_type: 2
+
+       Android is supported by LRM Mobile, which wraps this same engine:
+
+         curl -fsSL https://raw.githubusercontent.com/hacvilke/lrm-mobile/main/scripts/install.sh | sh
+
+       (To build this repository from source inside Termux instead:
+        pkg install golang git, then rerun with --source.)
+ANDROID
+  [ "${USE_SOURCE:-0}" = 1 ] || exit 1
+  printf 'continuing anyway because --source was given\n\n' >&2
+fi
+
 detect_os() {
   case "$(uname -s)" in
     Linux)  echo linux ;;
@@ -214,8 +255,34 @@ install -m 0755 "$SRC" "$DEST" 2>/dev/null || {
 }
 
 say ""
-version_out="$("$DEST" version 2>/dev/null | head -1 || true)"
-say "installed: ${DEST}${version_out:+  ($version_out)}"
+say "installed: ${DEST}"
+
+# Verify the binary actually runs on THIS machine before declaring success.
+# A checksum proves we downloaded the bytes we meant to download; it says
+# nothing about whether this kernel will load them. Skipping this check is
+# how a binary that cannot start gets reported as a successful install.
+say "checking that it runs here ..."
+if run_out="$("$DEST" version 2>&1)"; then
+  say "  ok  $(printf '%s\n' "$run_out" | head -1)"
+elif run_out="$("$DEST" --help 2>&1)"; then
+  say "  ok  lrm --help works"
+else
+  case "$run_out" in
+    *e_type*)
+      die "the installed binary will not run on this machine:
+       ${run_out}
+       This binary is not position-independent, which usually means the
+       wrong platform was selected. On Android/Termux use LRM Mobile:
+       https://github.com/hacvilke/lrm-mobile" ;;
+    *"cannot execute"*|*"Exec format error"*)
+      die "the installed binary is for a different CPU or OS:
+       ${run_out}
+       Try --source to build for this machine." ;;
+    *)
+      die "the installed binary did not run:
+       ${run_out}" ;;
+  esac
+fi
 
 case ":${PATH}:" in
   *":${DEST_DIR}:"*) ;;

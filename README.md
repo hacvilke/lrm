@@ -24,9 +24,24 @@ directory (no root), and prints the PATH line if you need one. Options:
 `--version v0.3.0`, `--dir DIR`, `--from FILE` (offline/local binary),
 `--source` (build from source when no release fits), `--dry-run`.
 
-Prebuilt releases cover linux/darwin/windows on amd64 + arm64 (including
-the static linux/arm64 build used on Android via Termux). Building from
-source stays the same:
+Prebuilt releases cover **desktop** platforms: linux, darwin and windows
+on amd64 + arm64.
+
+**Android / Termux is a separate project.** A desktop `linux/arm64` binary
+cannot run on Android: Go's default build is `ET_EXEC`, and Android's
+loader only accepts position-independent executables, so it fails with
+`has unexpected e_type: 2` before `main()` is ever reached. Android needs
+its own build (`GOOS=android -buildmode=pie`), which lives in
+[lrm-mobile](https://github.com/hacvilke/lrm-mobile):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hacvilke/lrm-mobile/main/scripts/install.sh | sh
+```
+
+It reuses this repository unchanged as a submodule — same engine, same
+commands, mobile build and installer around it.
+
+Building from source stays the same:
 
 ```bash
 # Build from source (pure Go stdlib, no dependencies)
