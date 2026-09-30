@@ -76,6 +76,8 @@ footer {
     <a href="#features">features</a>
     <a href="#quickstart">quickstart</a>
     <a href="#gitreverse">git-reverse</a>
+    <a href="#dashboard">dashboard</a>
+    <a href="#security">security</a>
     <a href="#docs">docs</a>
     <a href="#source">source</a>
     <a href="#roadmap">roadmap</a>
@@ -145,6 +147,33 @@ Full table in the <a href="https://github.com/hacvilke/lrm/blob/main/docs/GIT_RE
   <tr><td><code>git push --force</code></td><td><i>impossible by design</i> — divergent tips become branches, never overwritten</td></tr>
   <tr><td>merge conflicts (<code>&lt;&lt;&lt;&lt;&lt;&lt;&lt;</code>)</td><td><code>HEAD-peer-&lt;short&gt;</code> branches — no markers injected into your files</td></tr>
 </table>
+
+<h2 id="dashboard">dashboard: your mesh, visible</h2>
+<pre><code>lrm dashboard        # http://127.0.0.1:8787 — one page, no scripts, no cloud
+lrm dashboard --snapshot mesh.html    # same page written to a file</code></pre>
+<p>
+The mesh is the product, so it should be visible. The dashboard shows live
+presence (who is connected, state, RTT), recent syncs with the files that
+actually moved (<code>+added</code>, <code>~changed</code>, <code>-deleted</code>), the activity
+feed, and a <strong>read-only file browser</strong> over the workspace — exactly what
+you see after a teammate pushes: their files are on your disk, and here they
+are. Localhost by default; the browser is confined to the repository root and
+refuses the repo's own <code>.lrm</code> directory, symlink escapes, and traversal.</p>
+
+<h2 id="security">security: strangers never sync</h2>
+<p>
+Every repository carries a 16-byte <strong>workspace ID</strong>, minted at init and
+carried inside Port Keys and pairing flows. The handshake compares it and
+refuses across mismatches before a single object moves; mDNS can announce
+presence but can never authorize anyone. Content is domain-separated and
+re-hashed against its address during transfer (a poisoned tree or commit is
+dropped, not trusted), every peer-supplied path is validated before it can
+touch disk, and device pairing signatures authenticate relay and hole-punch
+signaling.</p>
+<p><a href="https://github.com/hacvilke/lrm/blob/main/SECURITY.md">SECURITY.md</a>
+has the full model, limits, and the fixes from the red-team pass (traversal,
+CAS poisoning, builder hang, socket permissions, dashboard confinement) with
+the tests that pin them.</p>
 
 <h2 id="docs">docs</h2>
 <ul>

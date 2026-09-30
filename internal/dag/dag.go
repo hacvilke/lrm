@@ -27,11 +27,23 @@ type Commit struct {
 	Clock     vectorclock.Clock `json:"clock"`
 }
 
+// CommitDomain is the domain separator mixed into commit addresses.
+const CommitDomain = "lrm-commit-v1\n"
+
+// CommitAddress returns the content address of a serialized commit.
+func CommitAddress(raw []byte) cas.Hash {
+	h := sha256.New()
+	h.Write([]byte(CommitDomain))
+	h.Write(raw)
+	var out cas.Hash
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
 // Hash returns the commit's content address.
 func (c *Commit) Hash() cas.Hash {
 	raw, _ := json.Marshal(c)
-	typed := append([]byte("lrm-commit-v1\n"), raw...)
-	return sha256.Sum256(typed)
+	return CommitAddress(raw)
 }
 
 // Store persists commits in a CAS plus in-memory index helpers.

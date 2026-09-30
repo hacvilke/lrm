@@ -79,6 +79,8 @@ func Run(argv []string) int {
 		err = cmdWatch(args)
 	case "daemon", "d":
 		err = cmdDaemon(args)
+	case "dashboard", "dash":
+		err = cmdDashboard(args)
 	case "pair":
 		err = cmdPair(args)
 	case "devices":
@@ -200,7 +202,9 @@ P2P mesh:
                                             sync with LAN peers (or one peer)
   send <FILE> --peer HOST:PORT [--via H:P]  hand a file to a peer (lands in inbox/)
   watch                                    stream live daemon events (Ctrl-C to stop)
-  daemon [--port PORT]                      run background engine (watch+sync)
+  daemon [--port PORT] [--peer HOST:PORT]   run background engine (watch+sync)
+  dashboard [--port PORT] [--host H] [--snapshot FILE] [--json]
+                                            local window: peers, syncs, files
 
 Git-reverse compat (git spellings, P2P standing):
   add [paths...]                            confirm auto-tracked paths (no-op ritual)

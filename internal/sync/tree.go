@@ -11,11 +11,27 @@ import (
 	"strings"
 
 	"github.com/lrm-project/lrm/internal/cas"
+	"github.com/lrm-project/lrm/internal/dag"
 	"github.com/lrm-project/lrm/internal/merkle"
 )
 
-// BuildTreeFromMap builds + stores a Merkle tree from a flat path→blob-hash map.
+// maxControlObject caps tree/commit objects accepted through the verified
+// copy path. Trees and commits are small by design; anything larger filed
+// under a control address is either a bug or an attack.
+const maxControlObject = 16 << 20
+
+// BuildTreeFromMap builds + stores a Merkle tree from a flat path→blob-hash
+// map. Keys must be clean tree paths: flattened maps can come from PEER trees,
+// and a hostile key like "/x" would otherwise send buildLevel into infinite
+// recursion (empty-name subdirectory) instead of failing.
 func BuildTreeFromMap(store *cas.Store, flat map[string]string) (cas.Hash, error) {
+	keys := make([]string, 0, len(flat))
+	for p := range flat {
+		keys = append(keys, p)
+	}
+	if err := merkle.CleanTreePaths(keys); err != nil {
+		return cas.Nil, fmt.Errorf("refusing to build tree: %w", err)
+	}
 	return buildLevel(store, flat, "")
 }
 
@@ -64,8 +80,7 @@ func buildLevel(store *cas.Store, flat map[string]string, prefix string) (cas.Ha
 	if err != nil {
 		return cas.Nil, err
 	}
-	typed := append([]byte("lrm-tree-v1\n"), raw...)
-	h := sha256.Sum256(typed)
+	h := merkle.TreeAddress(raw)
 	return h, putRawAt(store, h, raw)
 }
 
@@ -98,8 +113,14 @@ func putRawAt(store *cas.Store, h cas.Hash, raw []byte) error {
 }
 
 // copyBlobToAddress files already-stored blob bytes (under got) at the
-// domain-separated address want (for trees/commits whose address includes
-// a prefix). Streams with bounded memory.
+// explicit address want — after PROVING the bytes hash there under the
+// repository's own addressing rules (blob, or domain-separated tree/commit).
+//
+// This is the last line of defence against CAS poisoning: a peer chooses
+// both the bytes it sends and the address it claims they belong to. Filing
+// unverified bytes at a requested address would let a hostile peer decide
+// what "the tree of commit X" contains, so a mismatch is refused and the
+// bytes are dropped. Streaming, bounded memory, hard size cap.
 func copyBlobToAddress(e *Engine, got, want cas.Hash) error {
 	if e.Repo.CAS.Exists(want) {
 		return nil
@@ -123,9 +144,29 @@ func copyBlobToAddress(e *Engine, got, want cas.Hash) error {
 	}
 	name := tmp.Name()
 	defer func() { _ = os.Remove(name) }()
-	if _, err := io.CopyBuffer(tmp, rc, make([]byte, 32*1024)); err != nil {
+
+	// One pass, three candidate addresses: raw blob, tree, commit.
+	hBlob := sha256.New()
+	hTree := sha256.New()
+	hCommit := sha256.New()
+	_, _ = hTree.Write([]byte(merkle.TreeDomain))
+	_, _ = hCommit.Write([]byte(dag.CommitDomain))
+	var blob, tree, commit [32]byte
+	mw := io.MultiWriter(tmp, hBlob, hTree, hCommit)
+	if _, err := io.CopyBuffer(mw, io.LimitReader(rc, maxControlObject+1), make([]byte, 32*1024)); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("copy blob: %w", err)
+		return fmt.Errorf("copy object: %w", err)
+	}
+	if fi, err := tmp.Stat(); err == nil && fi.Size() > maxControlObject {
+		_ = tmp.Close()
+		return fmt.Errorf("object larger than control-object cap (%d bytes) — refusing", maxControlObject)
+	}
+	copy(blob[:], hBlob.Sum(nil))
+	copy(tree[:], hTree.Sum(nil))
+	copy(commit[:], hCommit.Sum(nil))
+	if cas.Hash(blob) != want && cas.Hash(tree) != want && cas.Hash(commit) != want {
+		_ = tmp.Close()
+		return fmt.Errorf("object bytes do not hash to the requested address %s (possible poisoning) — object dropped", cas.Short(want))
 	}
 	if err := tmp.Close(); err != nil {
 		return err

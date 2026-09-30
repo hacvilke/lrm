@@ -106,6 +106,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm join <PORTKEY> [--init]` | verified dial + full history sync |
 | `lrm sync [--peer H:P]` | sync with LAN peers (or one peer) |
 | `lrm daemon [--port P] [--peer H:P]` | real-time engine: watch + announce + sync + keepalive (+ a continuously-dialed static peer) |
+| `lrm dashboard [--port P] [--host H] [--snapshot F] [--json]` | local window on the mesh: presence, syncs, activity, and a read-only file browser for the workspace (localhost-only by default) |
 | `lrm pair [INVITE] [NAME]` | device pairing — prints your invite, or pairs with the invite's device (works outside any repo) |
 | `lrm devices` | list the paired-device address book |
 | `lrm unpair <ID>` | remove a paired device (id or unique short prefix) |

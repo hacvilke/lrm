@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/lrm-project/lrm/internal/cas"
+	"github.com/lrm-project/lrm/internal/dash"
 	"github.com/lrm-project/lrm/internal/mdns"
 	"github.com/lrm-project/lrm/internal/mux"
 	"github.com/lrm-project/lrm/internal/natpmp"
@@ -81,6 +82,14 @@ type Daemon struct {
 	onChange      func(int)
 	onEvent       func(string)
 	shutdownOnce  sync.Once
+	// listen address, published for tools and tests
+	addrMu     sync.Mutex
+	listenAddr string
+	// dashboard snapshot state (published to .lrm/status.json)
+	statusMu  sync.Mutex
+	syncLog   []dash.SyncEntry
+	rejectLog []dash.RejectEntry
+	eventLog  []dash.EventEntry
 	// Device layer (pairing): machine-wide node identity + address book.
 	nodeID *node.Identity
 	book   *node.Book
@@ -163,6 +172,7 @@ func (d *Daemon) Uptime() time.Duration { return time.Since(d.started) }
 // event emits a mesh event if a listener is attached.
 func (d *Daemon) event(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
+	d.noteEvent(msg)
 	if d.onEvent != nil {
 		d.onEvent(msg)
 	}
@@ -250,6 +260,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("listen :%d: %w", d.cfg.Port, err)
 	}
 	d.ln = ln
+	d.setListenAddr(ln.Addr().String())
 	// Actual port (if :0).
 	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
 		d.cfg.Port = addr.Port
@@ -263,13 +274,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.started = time.Now()
 	var wg sync.WaitGroup
-	wg.Add(6)
+	wg.Add(7)
+	d.publishStatus()
 	go func() { defer wg.Done(); d.acceptLoop(ctx) }()
 	go func() { defer wg.Done(); d.browseLoop(ctx) }()
 	go func() { defer wg.Done(); d.peerLoop(ctx) }()
 	go func() { defer wg.Done(); d.watchLoop(ctx) }()
 	go func() { defer wg.Done(); d.refreshMappingsLoop(ctx) }()
 	go func() { defer wg.Done(); d.controlLoop(ctx) }()
+	go func() { defer wg.Done(); d.statusLoop(ctx) }()
 
 	// 3. WAN mapping — AFTER the loops are live: NAT discovery can block
 	// for ~15s on networks without an IGD (UPnP SSDP timeout + NAT-PMP
@@ -280,6 +293,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 	d.Shutdown()
 	wg.Wait()
 	return nil
+}
+
+// ListenAddr returns the address the daemon is listening on, or "" before
+// Run has bound the port. Safe from any goroutine.
+func (d *Daemon) ListenAddr() string {
+	d.addrMu.Lock()
+	defer d.addrMu.Unlock()
+	return d.listenAddr
+}
+
+func (d *Daemon) setListenAddr(a string) {
+	d.addrMu.Lock()
+	d.listenAddr = a
+	d.addrMu.Unlock()
 }
 
 // Shutdown stops everything and removes router mappings.
@@ -630,8 +657,10 @@ func (d *Daemon) handleInbound(sc *transport.SecureConn) {
 		}
 	}
 	d.stampNode(eng)
+	before := d.headTree()
 	res, err := eng.ServeInbound(ctl, sess, first)
 	_ = sess.Close()
+	d.noteSync(res, err, false, peerHex, pc.remoteUser, d.changedFiles(before))
 	if err != nil {
 		return
 	}
@@ -812,7 +841,9 @@ func (d *Daemon) serveDialer(ctx context.Context, sc *transport.SecureConn, p md
 		}
 	}
 	d.stampNode(eng)
+	before := d.headTree()
 	res, err := eng.SyncWithSession(sess, true, "")
+	d.noteSync(res, err, true, peerHex, pc.remoteUser, d.changedFiles(before))
 	if err != nil {
 		return
 	}
@@ -923,6 +954,11 @@ func (d *Daemon) controlLoop(ctx context.Context) {
 	if err != nil {
 		d.event("control: unix socket unavailable (%v)", err)
 		return
+	}
+	// Owner-only: the control socket answers presence queries and can nudge
+	// syncs, so other local accounts must not be able to connect.
+	if err := os.Chmod(path, 0o600); err != nil {
+		d.event("control: chmod %s: %v", path, err)
 	}
 	d.ctrlMu.Lock()
 	d.ctrlLn = ln

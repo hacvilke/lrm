@@ -29,6 +29,17 @@ func Checkout(r *store.Repo, commit cas.Hash) error {
 	if err := merkle.Flatten(r.CAS, th, "", flat); err != nil {
 		return err
 	}
+	// Validate EVERY path before writing ANY file. The tree came from a
+	// peer, so an entry like "../../.ssh/authorized_keys" would otherwise
+	// write outside the repository — a hostile tree must be refused whole,
+	// never half-applied.
+	paths := make([]string, 0, len(flat))
+	for p := range flat {
+		paths = append(paths, p)
+	}
+	if err := merkle.CleanTreePaths(paths); err != nil {
+		return fmt.Errorf("refusing checkout of %s: hostile tree entry: %w", cas.Short(commit), err)
+	}
 	// Write files.
 	for p, hx := range flat {
 		h, err := cas.ParseHex(hx)

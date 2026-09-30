@@ -32,6 +32,20 @@ type TreeEntry struct {
 	Chunked bool   `json:"chunked,omitempty"` // true if Hash is a chunk manifest
 }
 
+// TreeDomain is the domain separator mixed into tree addresses, so a tree
+// can never be confused with a blob that happens to have identical bytes.
+const TreeDomain = "lrm-tree-v1\n"
+
+// TreeAddress returns the content address of a canonical tree object.
+func TreeAddress(raw []byte) cas.Hash {
+	h := sha256.New()
+	h.Write([]byte(TreeDomain))
+	h.Write(raw)
+	var out cas.Hash
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
 // Tree is a directory object.
 type Tree struct {
 	Version int         `json:"version"`
@@ -158,10 +172,9 @@ func buildDir(store *cas.Store, fsRoot, dir string, ch *chunker.Chunker, workers
 	if err != nil {
 		return cas.Nil, err
 	}
-	// Hash canonically: prefix domain separator so tree hashes never
+	// Hash canonically through the domain separator so tree hashes never
 	// collide with blob hashes of identical bytes.
-	typed := append([]byte("lrm-tree-v1\n"), raw...)
-	h := sha256.Sum256(typed)
+	h := TreeAddress(raw)
 	// Store under its own content address (store raw; address derived from typed).
 	if err := putRawAt(store, h, raw); err != nil {
 		return cas.Nil, err
