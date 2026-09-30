@@ -12,11 +12,25 @@ Developer A  ◄─── direct P2P (LAN mdns / WAN Port Key) ───►  Dev
    .lrm/objects (SHA-256 CAS)         encrypted mux streams        .lrm/objects (SHA-256 CAS)
 ```
 
-## 60-second quickstart
+## Install (no Go, no experience needed)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hacvilke/lrm/main/scripts/install.sh | sh
+```
+
+The installer detects your platform, downloads the prebuilt binary for it,
+verifies it against the release checksums, installs it under your home
+directory (no root), and prints the PATH line if you need one. Options:
+`--version v0.3.0`, `--dir DIR`, `--from FILE` (offline/local binary),
+`--source` (build from source when no release fits), `--dry-run`.
+
+Prebuilt releases cover linux/darwin/windows on amd64 + arm64 (including
+the static linux/arm64 build used on Android via Termux). Building from
+source stays the same:
 
 ```bash
-# Build
-make build          # produces ./lrm (pure Go stdlib, no dependencies)
+# Build from source (pure Go stdlib, no dependencies)
+make build          # produces ./lrm
 
 # Alice starts a project
 mkdir demo && cd demo
@@ -107,6 +121,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm sync [--peer H:P]` | sync with LAN peers (or one peer) |
 | `lrm daemon [--port P] [--peer H:P]` | real-time engine: watch + announce + sync + keepalive (+ a continuously-dialed static peer) |
 | `lrm dashboard [--port P] [--host H] [--snapshot F] [--json]` | local window on the mesh: presence, syncs, activity, and a read-only file browser for the workspace (localhost-only by default) |
+| `lrm receive [--port P] [--once] [--max-size MiB]` | phone-friendly upload page: any device on the Wi-Fi sends files (no app) into `inbox/`, committed and synced automatically |
 | `lrm pair [INVITE] [NAME]` | device pairing — prints your invite, or pairs with the invite's device (works outside any repo) |
 | `lrm devices` | list the paired-device address book |
 | `lrm unpair <ID>` | remove a paired device (id or unique short prefix) |

@@ -5,6 +5,20 @@ companion to the [feature README](../README.md); the wire details live in
 [PROTOCOL.md](PROTOCOL.md), the automation recipes in
 [AUTOMATION.md](AUTOMATION.md).
 
+## Install (one line, no Go required)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hacvilke/lrm/main/scripts/install.sh | sh
+```
+
+Downloads the prebuilt binary for your OS/CPU, checks it against the
+release checksums, and installs it under your home directory — no root, no
+toolchain. Add `--dir ~/bin` to choose the location, `--source` to build
+from a checkout instead, `--from lrm` to install a binary you already have.
+
+Android (Termux): `pkg install curl && sh -c "$(curl -fsSL .../install.sh)"`
+picks the static linux/arm64 build, which runs as-is.
+
 ## The mental model
 
 Every machine holds the **full repo** — commits, history graph,
@@ -68,6 +82,24 @@ The file lands in the peer's `inbox/` — hash-verified, workspace-gated
 (strangers are refused) — and their daemon auto-commits it. Received
 files never silently overwrite anything: a name collision becomes
 `report-1.pdf`.
+
+## Sending files from a phone (no app, no account)
+
+```sh
+lrm receive                 # prints: open this on the phone → http://192.168.1.5:8788/?t=9f2c…
+lrm receive --once          # one upload, then the door shuts
+lrm receive --max-size 500  # per-file cap in MiB (default 2 GiB)
+```
+
+Open the printed link on the phone and pick files; they stream into the
+repository's `inbox/` directory and the daemon commits them like any other
+change — so a photo or a document becomes a normal, synced, versioned
+commit on all your machines. The link carries a secret token (nothing is
+readable through it — it only takes files in), uploads are size-capped,
+names are reduced to safe basenames, and `--once` makes it single-use.
+Works on the same Wi-Fi; for a phone on mobile data, put the receiver
+behind your existing port mapping (or use `lrm send`/Port Keys device to
+device, which is end-to-end encrypted).
 
 ## Keeping an eye on it
 
