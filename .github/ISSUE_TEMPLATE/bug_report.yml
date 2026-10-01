@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in LRM does not behave as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **On Android or Termux?** This repository is desktop-only. Android
+        is handled by https://github.com/hacvilke/lrm-mobile — please open
+        installation and platform issues there.
+  - type: input
+    id: version
+    attributes:
+      label: Output of `lrm version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and CPU
+      placeholder: "Ubuntu 24.04 amd64 / macOS 15 arm64 / Windows 11 amd64"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands, starting from `lrm init` if you can.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: mesh
+    attributes:
+      label: For sync or mesh problems
+      description: Output of `lrm status` and `lrm replog --last 20` from BOTH ends.
+      render: shell

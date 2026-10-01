@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something LRM should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LRM has **zero third-party dependencies** and that is deliberate.
+        A proposal that needs one has to make the case for it explicitly.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not the solution you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like LRM to do?
+    validations:
+      required: true
+  - type: input
+    id: git
+    attributes:
+      label: Does git have an equivalent? What does it call it?
+      description: LRM deliberately mirrors git's spellings where the concept maps.
+  - type: checkboxes
+    id: deps
+    attributes:
+      label: Dependencies
+      options:
+        - label: This can be built with the Go standard library alone

@@ -253,3 +253,34 @@ if a command breaks, the build breaks.
 - [ ] Delta-compressed object transfer (xdelta) for huge binaries
 - [ ] FUSE workdir overlay for instant multi-GB checkouts
 - [ ] `lrm web` — local DAG visualizer
+
+## Contributing
+
+`main` is protected: everything lands through a pull request with passing
+CI, maintainers included. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+house rules — the important ones being **no third-party dependencies**
+(`go.mod` has no `require` block and that is deliberate) and
+`scripts/check-all.sh` green before and after.
+
+Android and Termux are handled by
+[lrm-mobile](https://github.com/hacvilke/lrm-mobile), not here.
+
+Please read the [Code of Conduct](CODE_OF_CONDUCT.md), and report
+vulnerabilities privately per [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE)
+and [NOTICE](NOTICE).
+
+Apache-2.0 was chosen over MIT for its explicit patent grant: LRM
+implements content chunking, deduplication, Merkle synchronisation and NAT
+traversal, all areas with meaningful patent exposure. Every contributor
+grants a patent licence, and that grant terminates for anyone who brings a
+patent suit over the work.
+
+Contributions are accepted under section 5 of the licence — by submitting
+a pull request you license it under the same terms. There is no CLA.
+
+LRM has no third-party dependencies, so the binary you build contains no
+other party's code.

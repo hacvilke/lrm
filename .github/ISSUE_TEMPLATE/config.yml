@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Android / Termux issue
+    url: https://github.com/hacvilke/lrm-mobile/issues/new/choose
+    about: This repository is desktop-only. Android is handled by LRM Mobile.
+  - name: Security vulnerability
+    url: https://github.com/hacvilke/lrm/security/advisories/new
+    about: Please report privately, not as a public issue.
+  - name: Quickstart and docs
+    url: https://github.com/hacvilke/lrm/blob/main/docs/QUICKSTART.md
+    about: Check the docs first — especially for mesh and pairing questions.
