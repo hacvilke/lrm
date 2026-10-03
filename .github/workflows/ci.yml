@@ -17,6 +17,26 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: scripts must stay executable
+        # A script that loses its +x bit fails CI with a bare
+        # "Permission denied" (exit 126) that looks nothing like a mode
+        # problem. It has happened: an editor or a file copy dropped the
+        # bit and `git add -A` committed 100755 -> 100644. Catch it here,
+        # where the message says exactly what to run.
+        run: |
+          fail=0
+          for f in scripts/*.sh; do
+            [ -e "$f" ] || continue
+            mode=$(git ls-files -s -- "$f" | awk '{print $1}')
+            if [ "$mode" != "100755" ]; then
+              echo "::error file=$f::$f is committed as $mode, expected 100755. Fix with: git update-index --chmod=+x $f"
+              fail=1
+            else
+              echo "  ok $f ($mode)"
+            fi
+          done
+          exit $fail
+
       - name: Check formatting (gofmt)
         run: |
           unformatted=$(gofmt -l .)
