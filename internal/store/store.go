@@ -259,16 +259,54 @@ func findRoot(start string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Remember a .lrm we rejected, so the error can explain why.
+	var skipped string
 	for {
-		if _, err := os.Stat(filepath.Join(abs, ".lrm")); err == nil {
+		if isRepoRoot(abs) {
 			return abs, nil
+		}
+		if skipped == "" {
+			if fi, err := os.Stat(filepath.Join(abs, ".lrm")); err == nil && fi.IsDir() {
+				skipped = abs
+			}
 		}
 		parent := filepath.Dir(abs)
 		if parent == abs {
+			if skipped != "" {
+				return "", fmt.Errorf(
+					"not an LRM repo (walking up from %s).\n"+
+						"       %s contains a .lrm directory, but it is LRM's machine-wide\n"+
+						"       state (device identity, known peers), not a repository.\n"+
+						"       Run `lrm init` inside a project directory instead.",
+					start, filepath.Join(skipped, ".lrm"))
+			}
 			return "", fmt.Errorf("not an LRM repo (no .lrm found walking up from %s)", start)
 		}
 		abs = parent
 	}
+}
+
+// isRepoRoot reports whether dir is the root of an LRM repository.
+//
+// The presence of a .lrm directory is not sufficient. LRM's machine-wide
+// state also lives in ~/.lrm, so testing only for the directory makes the
+// home directory look like a repository -- and therefore every non-repo
+// folder inside it, since the walk reaches $HOME before giving up. The
+// symptom is a confusing failure from any command run outside a project:
+//
+//	error: read config: open C:\Users\brandon\.lrm\config.json:
+//	       The system cannot find the file specified.
+//
+// A repository is identified by its config, which machine state does not
+// have.
+func isRepoRoot(dir string) bool {
+	d := filepath.Join(dir, ".lrm")
+	fi, err := os.Stat(d)
+	if err != nil || !fi.IsDir() {
+		return false
+	}
+	_, err = os.Stat(filepath.Join(d, "config.json"))
+	return err == nil
 }
 
 func defaultUser() string {
