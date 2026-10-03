@@ -22,10 +22,14 @@ jobs:
         run: |
           set -e
           mkdir -p dist
+          VERSION="${GITHUB_REF#refs/tags/}"
+          [ -n "$VERSION" ] || VERSION=dev
+          echo "stamping builds as $VERSION"
+          LDF="-s -w -X github.com/lrm-project/lrm/internal/cli.Version=$VERSION"
           build() {
             os=$1; arch=$2; ext=""
             if [ "$os" = "windows" ]; then ext=".exe"; fi
-            GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "dist/lrm_${os}_${arch}${ext}" ./cmd/lrm
+            GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LDF" -o "dist/lrm_${os}_${arch}${ext}" ./cmd/lrm
           }
           build linux amd64
           build linux arm64
