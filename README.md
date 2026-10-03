@@ -24,6 +24,17 @@ directory (no root), and prints the PATH line if you need one. Options:
 `--version v0.3.0`, `--dir DIR`, `--from FILE` (offline/local binary),
 `--source` (build from source when no release fits), `--dry-run`.
 
+**Windows** has its own installer — PowerShell, no admin, no WSL:
+
+```powershell
+irm https://raw.githubusercontent.com/hacvilke/lrm/main/scripts/install.ps1 | iex
+```
+
+> Note: an unrelated npm package is also called `lrm`. If you have ever run
+> `npm i -g lrm`, its shim may sit ahead of this one on PATH and typing
+> `lrm` will fail with `MODULE_NOT_FOUND`. The installer detects that and
+> tells you how to clear it.
+
 Prebuilt releases cover **desktop** platforms: linux, darwin and windows
 on amd64 + arm64.
 
