@@ -39,6 +39,17 @@ import (
 )
 
 // Run dispatches argv (without program name). Returns exit code.
+
+// Version is the release this binary was built from. Release builds stamp
+// it with the tag via -ldflags "-X .../internal/cli.Version=vX.Y.Z"; a
+// plain `go build` leaves it as "dev", which is the honest answer for a
+// working tree that may not correspond to any release.
+//
+// It used to be a string literal, which meant every release reported the
+// same number no matter which tag produced it -- v0.3.2 binaries said
+// "lrm version 0.3.0" -- so a bug report could not identify the build.
+var Version = "dev"
+
 func Run(argv []string) int {
 	if len(argv) == 0 {
 		usage()
@@ -152,7 +163,7 @@ func Run(argv []string) int {
 	case "query", "q":
 		err = cmdQuery(args)
 	case "version", "-V", "--version":
-		fmt.Println("lrm version 0.3.0")
+		fmt.Println("lrm version " + Version)
 	case "help", "-h", "--help":
 		usage()
 	default:
