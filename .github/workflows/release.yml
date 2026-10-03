@@ -32,6 +32,7 @@ jobs:
           build darwin amd64
           build darwin arm64
           build windows amd64
+          build windows arm64
           cd dist && sha256sum lrm_* > SHA256SUMS.txt && cd ..
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

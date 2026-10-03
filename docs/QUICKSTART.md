@@ -26,6 +26,27 @@ pkg install curl
 curl -fsSL https://raw.githubusercontent.com/hacvilke/lrm-mobile/main/scripts/install.sh | sh
 ```
 
+### Windows
+
+```powershell
+irm https://raw.githubusercontent.com/hacvilke/lrm/main/scripts/install.ps1 | iex
+```
+
+**Do not use WSL for peer sync.** WSL2 puts Linux behind a NAT on its own
+virtual network (you will see a `172.x` address on `eth0`), so LRM
+announces an address nothing else on your LAN can reach: `lrm peers` finds
+nobody and no peer can dial you. Either run the native Windows build
+above, or switch WSL to mirrored networking — in
+`C:\Users\<you>\.wslconfig`:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+```
+
+then `wsl --shutdown`. Check with `ip addr` that WSL now holds a real LAN
+address rather than a `172.x` one.
+
 ## The mental model
 
 Every machine holds the **full repo** — commits, history graph,
