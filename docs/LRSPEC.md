@@ -117,6 +117,63 @@ stun_ip();                              // {ok, ip} — public IP via STUN
 `tcp_connect` returns `{ok, latency_ms}` (latency present even on
 failure). `http_get` caps bodies at 1 MiB.
 
+### 8.1 Batch probes — many endpoints at once
+
+The probes above run one at a time, because LRS evaluates sequentially.
+For anything more than a handful of endpoints the cost is dominated by
+waiting on the network, so these builtins fan the I/O out across a worker
+pool inside Go and return results **in input order**:
+
+```js
+dns_lookup_all(hosts [, workers]);
+// {ok, results:[{host, ok, ips, latency_ms}], count, failed, wall_ms}
+
+tcp_scan(hosts, ports [, timeout_ms [, workers]]);
+// probes every host x port combination
+// {ok, results:[{host, port, ok, latency_ms}], open:[...],
+//  open_count, closed_count, count, wall_ms}
+
+http_get_all(urls [, timeout_ms [, workers]]);
+// {ok, results:[{url, ok, status, bytes, latency_ms}], count, failed, wall_ms}
+
+sort_by_latency(results);   // any list of result maps, fastest first
+```
+
+The script itself stays single-threaded — there is no `parallel for`, and
+no interpreter state is shared across goroutines. That is deliberate: the
+evaluator shares globals, the recorder and the output writer, and `Env` is
+a plain map, so running loop bodies concurrently would be a data race and
+the obvious accumulator pattern (`down = down + 1`) is exactly what would
+break. Locking every variable access would serialise evaluation again and
+buy nothing, because evaluation was never the slow part.
+
+Workers default to 32 and are capped at 256. Both are bounded by the
+script's overall timeout, and `http_get_all` caps each body at 1 MiB so a
+large batch cannot exhaust memory.
+
+The difference on work dominated by timeouts:
+
+```js
+// eight unreachable hosts, 1s timeout each
+for h in dead { tcp_connect(h, 445, 1000); }   // 8003 ms
+tcp_scan(dead, [445], 1000);                   // 1001 ms
+```
+
+Example — sweep a subnet and rank what answered:
+
+```js
+let hosts = ["10.0.0.1","10.0.0.2","10.0.0.3","10.0.0.4"];
+let r = tcp_scan(hosts, [22, 80, 443, 8787], 1500);
+print(str(r.open_count) + " open of " + str(r.count) + " in " + str(r.wall_ms) + "ms");
+for o in sort_by_latency(r.open) {
+  print("  " + o.host + ":" + str(o.port) + "  " + str(o.latency_ms) + "ms");
+}
+assert(r.open_count > 0, "something is listening on this subnet");
+```
+
+Every probe is still recorded individually as a NET event, so the exported
+report contains the full per-endpoint trail plus a summary line.
+
 ## 9. LRM repo builtins (repo containing the run directory)
 
 ```js
