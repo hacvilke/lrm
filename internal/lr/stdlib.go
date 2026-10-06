@@ -504,6 +504,11 @@ func (ev *Evaluator) installStdlib() {
 		}
 		return okMap("fetched", fetched, "pushed", pushed, "notes", strings.Join(msgs, "; ")), nil
 	})
+
+	// Concurrent batch network builtins (dns_lookup_all, tcp_scan,
+	// http_get_all). The fan-out lives in Go so the interpreter stays
+	// single-threaded; see concurrent.go.
+	registerConcurrent(reg)
 }
 
 // failMap builds an {ok:false} map with extra keys (e.g. latency on failure).
