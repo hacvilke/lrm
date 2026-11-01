@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -208,8 +209,8 @@ Local engine:
 
 P2P mesh:
   peers [--timeout SEC]                     discover LAN developers
-  share [--port PORT] [--no-upnp] [--no-natpmp] [--lifetime SEC]
-                                            map router port + print Port Key
+  share [--port PORT] [--lan] [--no-upnp] [--no-natpmp] [--lifetime SEC]
+                                            print Port Key(s); --lan = same-Wi-Fi only, no router mapping
   join <PORTKEY> [--init]                   connect via Port Key + sync
   sync [--peer HOST:PORT] [--via H:P] [--bwlimit 2MB]
                                             sync with LAN peers (or one peer)
@@ -225,7 +226,7 @@ Git-reverse compat (git spellings, P2P standing):
   add [paths...]                            confirm auto-tracked paths (no-op ritual)
   push [--peer HOST:PORT]                   sync out to peers (no force-push exists)
   pull | fetch [--peer HOST:PORT]            sync in from peers (bidir in one session)
-  clone <PORTKEY> [dir]                     verified dial + full history + checkout
+  clone <PORTKEY> [dir] [--user NAME]       verified dial + full history + checkout
   stash [push|pop|apply|list|show|drop|clear]  shelf / restore workdir deltas
   reset [--soft|--mixed|--hard] <ref>      move branch ref (± index ± workdir)
   fsck                                      verify CAS reachability from all refs
@@ -582,6 +583,7 @@ func cmdStatus(args []string) error {
 	fmt.Printf("root:   %s\n", cas.Hex(res.RootHash)[:12])
 	if res.Clean {
 		fmt.Println("status: clean (no changes)")
+		printConflicBranches(r)
 		printLiveDaemon(r.LrmDir)
 		return nil
 	}
@@ -589,7 +591,38 @@ func cmdStatus(args []string) error {
 	for _, ch := range res.Changes {
 		fmt.Printf("  %-8s %s\n", ch.Kind, ch.Path)
 	}
+	printConflicBranches(r)
 	return nil
+}
+
+// printConflicBranches reports refs that a concurrent-edit sync parked as
+// HEAD-peer-<short>. Without this, `status` says "clean" while a teammate's
+// version of a file sits on a branch nobody knows about — the daemon logs it
+// once, at 3am, in a terminal nobody is watching. Silence there reads as
+// "nothing to see", which is the one thing it must never mean.
+func printConflicBranches(r *store.Repo) {
+	branches, err := r.ListBranches()
+	if err != nil {
+		return
+	}
+	var conflicts []string
+	for _, b := range branches {
+		if strings.HasPrefix(b, "HEAD-peer-") {
+			conflicts = append(conflicts, b)
+		}
+	}
+	if len(conflicts) == 0 {
+		return
+	}
+	sort.Strings(conflicts)
+	fmt.Println()
+	fmt.Printf("conflict: %d branch(es) from concurrent edits — YOUR work is intact on your branch:\n", len(conflicts))
+	for _, b := range conflicts {
+		tip, _ := r.GetRef(b)
+		fmt.Printf("  %-24s %s\n", b, shortOrUnborn(tip))
+	}
+	fmt.Println("  inspect:  lrm show <branch>        merge:  lrm merge <branch>")
+	fmt.Println("  discard:  lrm branch -D <branch>")
 }
 
 // daemonStatus holds the live-daemon presence snapshot.
@@ -1327,8 +1360,13 @@ func cmdShare(args []string) error {
 	portStr, args := flagVal(args, "--port", "-p")
 	lifeStr, args := flagVal(args, "--lifetime")
 	noUPnP, args := hasFlag(args, "--no-upnp")
-	noPMP, _ := hasFlag(args, "--no-natpmp", "--no-pmp")
-	_ = args
+	noPMP, args := hasFlag(args, "--no-natpmp", "--no-pmp")
+	// --lan skips router mapping and STUN entirely and mints a key with this
+	// machine's LAN address. That is the only key a teammate on the same
+	// Wi-Fi can actually dial: a WAN key points at the router's public IP,
+	// and most routers do not hairpin, so the dial times out even though
+	// both machines are on one switch. --local is an alias.
+	lanOnly, _ := hasFlag(args, "--lan", "--local")
 	r, err := openRepo()
 	if err != nil {
 		return err
@@ -1346,7 +1384,11 @@ func cmdShare(args []string) error {
 			lifetime = n
 		}
 	}
-	fmt.Printf("LRM share — opening WAN port %d (user %s, peer %s)\n", port, r.Config.User, r.Identity.ShortID())
+	if lanOnly {
+		fmt.Printf("LRM share — local network only, port %d (user %s, peer %s)\n", port, r.Config.User, r.Identity.ShortID())
+	} else {
+		fmt.Printf("LRM share — opening WAN port %d (user %s, peer %s)\n", port, r.Config.User, r.Identity.ShortID())
+	}
 	// Probe early (cheap): a Port Key is useless if nobody accepts the dial.
 	served := isListening(port)
 
@@ -1362,7 +1404,9 @@ func cmdShare(args []string) error {
 	// Step A: UPnP.
 	upnpOK := false
 	var gw *upnp.Gateway
-	if !noUPnP {
+	if lanOnly {
+		fmt.Println("[1/3] UPnP skipped (--lan: same-network share needs no router mapping)")
+	} else if !noUPnP {
 		fmt.Print("[1/3] Query Local Gateway via UPnP... ")
 		g, err := upnp.DiscoverGateway(4 * time.Second)
 		if err != nil {
@@ -1382,7 +1426,9 @@ func cmdShare(args []string) error {
 	pmpOK := false
 	var pmpGW []byte
 	var pmpExt uint16
-	if !upnpOK && !noPMP {
+	if lanOnly {
+		fmt.Println("[2/3] NAT-PMP skipped (--lan)")
+	} else if !upnpOK && !noPMP {
 		fmt.Print("[2/3] Query via NAT-PMP / PCP... ")
 		gwIP, err := natpmp.DiscoverGateway()
 		if err != nil {
@@ -1401,7 +1447,7 @@ func cmdShare(args []string) error {
 	} else {
 		fmt.Println("[2/3] NAT-PMP skipped (--no-natpmp)")
 	}
-	if !upnpOK && !pmpOK {
+	if !lanOnly && !upnpOK && !pmpOK {
 		fmt.Println("[2/3] Fallback to Manual Port — automatic mapping failed.")
 		fmt.Printf("      Please manually forward port %d on your router, or use a relay.\n", port)
 	}
@@ -1415,41 +1461,93 @@ func cmdShare(args []string) error {
 		fmt.Printf("OK (%s via LRM_SHARE_IP)", ip.String())
 		fmt.Println()
 	}
-	fmt.Print("[3/3] Fetch Public IP (STUN)... ")
-	if upnpOK && gw != nil {
+	if lanOnly {
+		fmt.Println("[3/3] Public IP skipped (--lan)")
+	}
+	if !lanOnly {
+		fmt.Print("[3/3] Fetch Public IP (STUN)... ")
+	}
+	if !lanOnly && upnpOK && gw != nil {
 		if ip, err := gw.ExternalIP(); err == nil && ip != nil {
 			publicIP = ip
 			fmt.Printf("OK (%s via UPnP)\n", ip.String())
 		}
 	}
-	if publicIP == nil {
+	if !lanOnly && publicIP == nil {
 		ip, err := stun.DiscoverPublicIP(nil, 5*time.Second)
 		if err != nil || ip == nil {
 			fmt.Printf("FAIL (%v)\n", shortErr(err))
 			fmt.Println()
-			fmt.Printf("Automatic port mapping failed. Please manually forward port %d or use a fallback relay.\n", port)
-			fmt.Printf("Your LAN addresses: %s (share these + port for same-WiFi join)\n", strings.Join(mdns.LocalAddrs(), ", "))
+			fmt.Printf("No public IP, so no WAN key. Teammates on THIS network can still join:\n")
+			if lan := lanIP(); lan != "" {
+				lanKey := portkey.Generate(r.Identity.Pub, net.ParseIP(lan), uint16(port), wsBytes(r.Config.Workspace))
+				fmt.Printf("  LAN key: %s\n", lanKey.Encode())
+				fmt.Printf("           %s\n", lanKey.Human())
+			} else {
+				fmt.Printf("Your LAN addresses: %s (share these + port %d)\n", strings.Join(mdns.LocalAddrs(), ", "), port)
+			}
 			if !served {
 				printServeWarning(port)
 			}
-			return fmt.Errorf("could not determine public IP; no Port Key generated")
+			return fmt.Errorf("could not determine public IP; no WAN Port Key generated")
 		}
 		publicIP = ip
 		fmt.Printf("OK (%s via STUN)\n", ip.String())
 	}
-	// Generate key.
-	key := portkey.Generate(r.Identity.Pub, publicIP, mappedPort, wsBytes(r.Config.Workspace))
+	// Generate the key(s). A WAN key points at the router's external address;
+	// that address is usually unreachable from inside the same network
+	// (routers rarely hairpin), so a teammate on the same Wi-Fi needs the LAN
+	// key instead. Print both whenever both exist — picking one for the user
+	// is how a working setup looks broken.
+	ws := wsBytes(r.Config.Workspace)
+	var lanKey, wanKey *portkey.LrmPortKey
+	if lan := lanIP(); lan != "" {
+		lanKey = portkey.Generate(r.Identity.Pub, net.ParseIP(lan), uint16(port), ws)
+	}
+	if !lanOnly && publicIP != nil {
+		wanKey = portkey.Generate(r.Identity.Pub, publicIP, mappedPort, ws)
+	}
+
 	fmt.Println()
-	fmt.Println("Share this Port Key with your teammate (it expires with the lease):")
+	switch {
+	case lanOnly && lanKey != nil:
+		fmt.Println("Port Key for teammates on this network:")
+		fmt.Println()
+		fmt.Printf("  %s\n", lanKey.Encode())
+		fmt.Println()
+		fmt.Printf("Human form: %s\n", lanKey.Human())
+	case lanOnly:
+		fmt.Println("No LAN address found (no non-loopback IPv4 interface).")
+		fmt.Println("A --lan share is useless here; check that Wi-Fi is connected.")
+		return fmt.Errorf("no LAN address for a local share")
+	case lanKey != nil && wanKey != nil:
+		fmt.Println("Two keys — hand your teammate the one that matches where they are:")
+		fmt.Println()
+		fmt.Printf("  same network as me (%s):\n", lanKey.Addr())
+		fmt.Printf("    %s\n", lanKey.Encode())
+		fmt.Println()
+		fmt.Printf("  from anywhere else (%s — needs port %d forwarded, or a relay):\n", wanKey.Addr(), mappedPort)
+		fmt.Printf("    %s\n", wanKey.Encode())
+		fmt.Println()
+		fmt.Printf("Human forms: %s  |  %s\n", lanKey.Human(), wanKey.Human())
+	case wanKey != nil:
+		fmt.Println("Port Key (this machine has no LAN address; WAN only):")
+		fmt.Println()
+		fmt.Printf("  %s\n", wanKey.Encode())
+		fmt.Println()
+		fmt.Printf("Human form: %s\n", wanKey.Human())
+	}
 	fmt.Println()
-	fmt.Printf("  %s\n", key.Encode())
-	fmt.Println()
-	fmt.Printf("Human form: %s\n", key.Human())
-	fmt.Println()
-	fmt.Println("Teammate runs:  lrm join <key>")
-	fmt.Printf("Lease: %ds. Mappings auto-expire; run `lrm daemon` to keep them renewed.\n", lifetime)
-	if !upnpOK && !pmpOK {
-		fmt.Printf("WARNING: no router mapping — ensure port %d is forwarded or the peer cannot dial you.\n", port)
+	fmt.Println("Teammate runs:  lrm clone <key>   (or `lrm join <key>` to merge into an existing repo)")
+	if lanOnly {
+		fmt.Println("No router mapping was created, so nothing expires; the key stays valid while")
+		fmt.Println("this machine keeps the same address and `lrm daemon` keeps serving the port.")
+	} else {
+		fmt.Printf("Lease: %ds. Mappings auto-expire; run `lrm daemon` to keep them renewed.\n", lifetime)
+	}
+	if !lanOnly && !upnpOK && !pmpOK {
+		fmt.Printf("WARNING: no router mapping — the WAN key only works if port %d is forwarded.\n", port)
+		fmt.Printf("         On the same Wi-Fi the LAN key needs no mapping at all.\n")
 	}
 	// Safety: a Port Key is useless if nobody accepts the dial. The share
 	// port must be served (normally by `lrm daemon` in this repo).
@@ -1468,6 +1566,32 @@ func printServeWarning(port int) {
 	fmt.Println("   Your teammate's dial will FAIL until you serve this repo:")
 	fmt.Printf("       lrm daemon --port %d   (in another terminal, same repo)\n", port)
 	fmt.Println("   The daemon also renews the router lease automatically.")
+}
+
+// printSyncHint adds the recovery steps for refusals that a retry will never
+// fix. A workspace mismatch is permanent until someone re-onboards, so the
+// bare "sync refused" line sends people back to the same command forever.
+func printSyncHint(res *sync.SyncResult) {
+	if res == nil || !res.NeedsClone {
+		return
+	}
+	printCloneRemedy()
+}
+
+// printCloneRemedy is the shared recovery text for a workspace refusal, used
+// both by the side that received the refusal (res.NeedsClone) and by the side
+// that sent it and got the error back.
+func printCloneRemedy() {
+	fmt.Println()
+	fmt.Println("  These repos were created independently, so their workspace IDs differ")
+	fmt.Println("  and they will never exchange objects. Pick one:")
+	fmt.Println()
+	fmt.Println("    a) keep both, but join them:  one side runs `lrm config workspace <id>`")
+	fmt.Println("       with the other's ID (`lrm config workspace` prints yours), then sync again")
+	fmt.Println("    b) cleaner: the founder runs `lrm share`, everyone else runs")
+	fmt.Println("       `lrm clone <key> <dir> --user your-name` into a NEW directory")
+	fmt.Println()
+	fmt.Println("  Rule of thumb: one person runs `lrm init`; everyone else clones.")
 }
 
 // isListening probes whether something accepts TCP on localhost:port.
@@ -1550,6 +1674,8 @@ func cmdJoin(args []string) error {
 		}
 		fmt.Printf("punched ✓ sync complete: fetched=%d pushed=%d\n", res.Fetched, res.Pushed)
 		fmt.Printf("result: %s\n", res.Message)
+		printSyncHint(res)
+		printSyncHint(res)
 		if res.ConflictBranch != "" {
 			fmt.Printf("conflict branch: %s (your work untouched; merge when ready)\n", res.ConflictBranch)
 		}
@@ -1583,10 +1709,15 @@ func cmdJoin(args []string) error {
 	eng.BWLimit = bwlimit(bwFlag)
 	res, err := eng.SyncWithSession(sess, true, "")
 	if err != nil {
+		if sync.IsWorkspaceMismatch(err) {
+			printCloneRemedy()
+			return fmt.Errorf("sync refused — different workspace (see the two options above)")
+		}
 		return fmt.Errorf("sync failed: %w", err)
 	}
 	fmt.Printf("sync complete: fetched=%d pushed=%d\n", res.Fetched, res.Pushed)
 	fmt.Printf("result: %s\n", res.Message)
+	printSyncHint(res)
 	if res.ConflictBranch != "" {
 		fmt.Printf("conflict branch: %s (your work untouched; merge when ready)\n", res.ConflictBranch)
 	}
@@ -1864,10 +1995,16 @@ func cmdSync(args []string) error {
 		_ = sess.Close()
 		_ = sc.Close()
 		if err != nil {
+			if sync.IsWorkspaceMismatch(err) {
+				fmt.Println("  sync refused — different workspace, not a network problem.")
+				printCloneRemedy()
+				continue
+			}
 			fmt.Printf("  sync failed: %v\n", shortErr(err))
 			continue
 		}
 		fmt.Printf("  fetched=%d pushed=%d: %s\n", res.Fetched, res.Pushed, res.Message)
+		printSyncHint(res)
 	}
 	return nil
 }
@@ -1894,6 +2031,7 @@ func cmdDaemon(args []string) error {
 	}
 	d.OnSync(func(res *sync.SyncResult) {
 		fmt.Printf("[sync] %s (fetched=%d pushed=%d)\n", res.Message, res.Fetched, res.Pushed)
+		printSyncHint(res)
 	})
 	d.OnChange(func(n int) {
 		fmt.Printf("[watch] auto-committed %d change(s)\n", n)

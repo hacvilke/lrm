@@ -72,9 +72,13 @@ lrm daemon                   # background real-time sync (both sides)
 lrm pair                     # print this device's invite
 lrm pair <invite> laptop     # on the other machine; paste its invite back
 
-# Different Wi-Fi / across the globe: Alice shares a Port Key
-lrm share
-# → lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
+# Two laptops on the office Wi-Fi: no router config at all
+lrm share --lan
+# → same network as me (192.168.1.20): lrm1_AQQiUwEBIPvCWoLq6VlKc14...
+# → from anywhere else (203.0.113.7):  lrm1_AgQj_IWjIPsCPXJgyA4CJ67AASYw...
+#
+# Different Wi-Fi / across the globe: plain `lrm share` prints both keys —
+# hand out the WAN one, which needs a port forward or a relay.
 
 # Bob pastes it — router ports auto-open via UPnP/NAT-PMP, STUN finds the
 # public IP, and a verified encrypted channel syncs history instantly:
@@ -142,8 +146,9 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm cat-file <HASH>` | print a CAS object |
 | `lrm replog [--last N]` | replication audit trail |
 | `lrm peers [--timeout S]` | discover LAN developers (workspace-tagged) |
-| `lrm share [--port P] [--no-upnp] [--no-natpmp]` | map router port, print Port Key |
+| `lrm share [--port P] [--lan] [--no-upnp] [--no-natpmp]` | print Port Key(s): WAN + same-network (`--lan` = LAN only, no router mapping) |
 | `lrm join <PORTKEY> [--init]` | verified dial + full history sync |
+| `lrm clone <PORTKEY> [dir] [--user NAME]` | verified dial + full history + checkout into a new dir |
 | `lrm sync [--peer H:P]` | sync with LAN peers (or one peer) |
 | `lrm daemon [--port P] [--peer H:P]` | real-time engine: watch + announce + sync + keepalive (+ a continuously-dialed static peer) |
 | `lrm dashboard [--port P] [--host H] [--snapshot F] [--json]` | local window on the mesh: presence, syncs, activity, and a read-only file browser for the workspace (localhost-only by default) |
@@ -154,7 +159,7 @@ lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 | `lrm add [paths...]` | confirm auto-tracked paths (the `add` ritual, reversed away) |
 | `lrm push [--peer H:P]` | sync history out to peers (force-push is impossible by design) |
 | `lrm pull` / `lrm fetch` | sync in from peers (bidirectional in one session) |
-| `lrm clone <PORTKEY> [dir]` | verified dial + full history + checkout |
+| `lrm clone <PORTKEY> [dir] [--user NAME]` | verified dial + full history + checkout |
 | `lrm stash [push\|pop\|apply\|list\|show\|drop\|clear]` | shelf / restore / inspect workdir deltas |
 | `lrm reset [--soft\|--mixed\|--hard] <H>` | move branch ref (± index ± workdir) |
 | `lrm fsck` | verify CAS reachability from all refs |
