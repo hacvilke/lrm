@@ -103,6 +103,8 @@ func Run(argv []string) int {
 		err = cmdUnpair(args)
 	case "cat-file", "cat":
 		err = cmdCatFile(args)
+	case "restore":
+		err = cmdRestore(args)
 	case "replog":
 		err = cmdReplog(args)
 	case "add":
@@ -1202,8 +1204,9 @@ func cmdCheckout(args []string) error {
 }
 
 func cmdMerge(args []string) error {
+	theirs, args := hasFlag(args, "--theirs")
 	if len(args) == 0 {
-		return fmt.Errorf("usage: lrm merge <branch|hash>")
+		return fmt.Errorf("usage: lrm merge <branch|hash> [--theirs]")
 	}
 	r, err := openRepo()
 	if err != nil {
@@ -1215,7 +1218,7 @@ func cmdMerge(args []string) error {
 	if err != nil {
 		return err
 	}
-	res, err := sync.MergeLocal(r, h, target)
+	res, err := sync.MergeLocalOpts(r, h, target, sync.MergeOptions{PreferTheirs: theirs})
 	if err != nil {
 		return err
 	}
@@ -1223,6 +1226,41 @@ func cmdMerge(args []string) error {
 	if res.MergedCommit != "" {
 		fmt.Printf("merge commit: %s\n", res.MergedCommit[:12])
 	}
+	if len(res.Unresolved) > 0 {
+		fmt.Println()
+		fmt.Println("  Overlapping files took one side. The losing version is still in the")
+		fmt.Println("  object store on the peer branch — nothing was overwritten on disk")
+		fmt.Println("  without a way back:")
+		for _, p := range res.Unresolved {
+			fmt.Printf("    %s\n", p)
+		}
+		fmt.Println()
+		fmt.Printf("  take the other side:  lrm restore %s <path>   (then lrm commit -m \"take theirs\")\n", target)
+		fmt.Println("  read it first:        lrm show <branch>")
+		fmt.Println("  done with it:         lrm branch -D <branch>   (removes the old peer tip)")
+	}
+	return nil
+}
+
+func cmdRestore(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: lrm restore <ref> <path>...")
+	}
+	r, err := openRepo()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	h, err := resolveCommitRef(r, args[0])
+	if err != nil {
+		return err
+	}
+	n, err := sync.RestorePaths(r, h, args[1:])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("restored %d path(s) from %s\n", n, args[0])
+	fmt.Println("working tree changed — review, then `lrm commit -m \"...\"`")
 	return nil
 }
 
