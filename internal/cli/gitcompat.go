@@ -75,6 +75,7 @@ func cmdPush(args []string) error {
 			continue
 		}
 		fmt.Printf("  pushed=%d fetched=%d: %s\n", res.Pushed, res.Fetched, res.Message)
+		printSyncHint(res)
 	}
 	return nil
 }
@@ -98,6 +99,7 @@ func cmdPull(args []string) error {
 			continue
 		}
 		fmt.Printf("  fetched=%d pushed=%d: %s\n", res.Fetched, res.Pushed, res.Message)
+		printSyncHint(res)
 		if res.ConflictBranch != "" {
 			fmt.Printf("  conflict branch: %s (your work untouched)\n", res.ConflictBranch)
 		}
@@ -107,12 +109,17 @@ func cmdPull(args []string) error {
 
 func cmdClone(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: lrm clone <portkey> [dir] [--via H:P]")
+		return fmt.Errorf("usage: lrm clone <portkey> [dir] [--user NAME] [--via H:P]")
 	}
 	keyStr := args[0]
 	dir := ""
 	rest := args[1:]
 	viaAddr, rest := flagVal(rest, "--via")
+	// The clone used to take its author name from the directory name, so a
+	// teammate who cloned into "app" committed everything as "app". Author
+	// identity is worth asking for explicitly.
+	userName, rest := flagVal(rest, "--user", "-u")
+	userGiven := userName != ""
 	if len(rest) > 0 {
 		dir = rest[0]
 	} else {
@@ -134,7 +141,10 @@ func cmdClone(args []string) error {
 	}
 	// v2 keys carry the workspace: the clone is born inside it, so the
 	// first sync passes the workspace gate instead of being refused.
-	r, err := store.InitWithWorkspace(abs, filepath.Base(abs), store.DefaultPort, key.WorkspaceHex())
+	if userName == "" {
+		userName = filepath.Base(abs)
+	}
+	r, err := store.InitWithWorkspace(abs, userName, store.DefaultPort, key.WorkspaceHex())
 	if err != nil {
 		return err
 	}
@@ -149,6 +159,12 @@ func cmdClone(args []string) error {
 		return fmt.Errorf("clone failed: %w", err)
 	}
 	fmt.Printf("cloned: fetched=%d — %s\n", res.Fetched, res.Message)
+	fmt.Printf("you are   %s in workspace %s\n", r.Config.User, shortHex(r.Config.Workspace))
+	if !userGiven {
+		fmt.Println()
+		fmt.Println("note: your author name is the directory name. Set it explicitly next time:")
+		fmt.Println("      lrm clone <key> <dir> --user your-name")
+	}
 	return nil
 }
 

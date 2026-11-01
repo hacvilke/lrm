@@ -34,6 +34,17 @@ import (
 //
 // Envelope: new messages carry Fam (family). Absent fam = "sync" — the
 // legacy pre-envelope wire format, still spoken by v1 peers unchanged.
+// ErrWorkspaceMismatch is the wire reason sent when a peer belongs to a
+// different workspace. It is a substring of the error handed to the caller so
+// the CLI can print the recovery steps instead of re-printing a retry that
+// cannot work.
+const ErrWorkspaceMismatch = "workspace mismatch: peer belongs to a different workspace"
+
+// IsWorkspaceMismatch reports whether err is the workspace-gate refusal.
+func IsWorkspaceMismatch(err error) bool {
+	return err != nil && strings.Contains(err.Error(), ErrWorkspaceMismatch)
+}
+
 type Msg struct {
 	Fam     string            `json:"fam,omitempty"` // message family ("" = sync/legacy)
 	Type    string            `json:"type"`
@@ -128,6 +139,9 @@ type SyncResult struct {
 	// RemoteFams is the comma-separated family list the remote offered.
 	RemoteFams string
 	Message    string
+	// NeedsClone marks a workspace-gate refusal: the recovery is to clone the
+	// peer's repo (or have the peer clone yours), not to retry the sync.
+	NeedsClone bool
 }
 
 // SyncWithSession runs a full bidirectional sync over an established mux
@@ -240,9 +254,14 @@ func (e *Engine) workspaceGate(ctl *mux.Stream, hello Msg, res *SyncResult) (boo
 		}
 	}
 	if local != "" && remote != "" && local != remote {
-		res.Message = fmt.Sprintf("workspace mismatch (%s ≠ %s) — sync refused, no objects exchanged",
+		// Say what to do about it. Two people who each ran `lrm init` look
+		// identical to two people in different projects; the fix is a one-liner
+		// and the old message did not contain it, so teams sat here guessing.
+		res.Message = fmt.Sprintf("workspace mismatch (%s ≠ %s) — these are two DIFFERENT repos, nothing synced. "+
+			"Only the repo's founder runs `lrm init`; everyone else joins with `lrm clone <port key>`.",
 			shortHexStr(local), shortHexStr(remote))
-		_ = writeMsg(ctl, Msg{Type: "error", Error: "workspace mismatch: peer belongs to a different workspace"})
+		res.NeedsClone = true
+		_ = writeMsg(ctl, Msg{Type: "error", Error: ErrWorkspaceMismatch})
 		return false, nil
 	}
 	return true, nil

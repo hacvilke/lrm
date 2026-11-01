@@ -63,20 +63,39 @@ save a file → auto-committed → pushed to online peers in ~2s.
 ## Day 1: same office / same LAN
 
 ```sh
-# maya starts the project
+# maya founds the project, one time
 lrm init --user maya
-lrm daemon
+lrm daemon --port 8443
+
+# maya hands out a key — on the SAME network use --lan
+lrm share --lan --port 8443
+#   → same network as me (192.168.1.20):
+#       lrm1_...
+#   → from anywhere else (203.0.113.7 — needs port 8443 forwarded, or a relay):
+#       lrm1_...
 
 # everyone else, one time each
-lrm init --user joe
-lrm config workspace <maya's workspace id>   # she runs: lrm config workspace
-lrm daemon
+lrm clone lrm1_... my-project --user joe
+lrm daemon --port 8443
 ```
+
+Use the **same-network** key for anyone on your Wi-Fi. The other one points at
+your router's public address, which most routers will not hairpin back to you,
+so it times out even though you are on one switch.
 
 That's the whole setup. mDNS finds peers on the shared network, and from
 then on it's save → sync all day. `lrm status` shows who's live and their
 latency; strangers on the same Wi-Fi (different workspace) never see your
 data — that's an enforced gate, not a promise.
+
+Already have work in its own repo? Either clone (above) or join the two by
+hand — `lrm config workspace` prints yours, `lrm config workspace <id>` adopts
+theirs. Independently-initialised repos otherwise refuse to sync, and say so.
+
+When two people edit the same file at the same time, nobody's work is
+overwritten: your version stays on your branch and theirs is parked on
+`HEAD-peer-<short>`. `lrm status` lists it, `lrm show <branch>` reads it,
+`lrm merge <branch>` brings it in (and tells you if the file really conflicts).
 
 ## Remote teammate / different network
 
