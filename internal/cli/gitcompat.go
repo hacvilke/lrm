@@ -67,17 +67,42 @@ func cmdPush(args []string) error {
 	if err != nil {
 		return err
 	}
+	failed := 0
 	for _, t := range targets {
 		fmt.Printf("pushing to %s...\n", t)
 		res, err := dialAndSync(r, t, nil)
 		if err != nil {
 			fmt.Printf("  failed: %v\n", shortErr(err))
+			failed++
 			continue
 		}
-		fmt.Printf("  pushed=%d fetched=%d: %s\n", res.Pushed, res.Fetched, res.Message)
+		// A sync can legitimately have nothing to say. Printing an empty
+		// message made a successful push look like it had hung: the sweep
+		// checks for a result line and "pushed=0 fetched=0: " was the only
+		// output in one CI run. Always end with a sentence.
+		fmt.Printf("  pushed=%d fetched=%d: %s\n", res.Pushed, res.Fetched, syncSummary(res))
 		printSyncHint(res)
 	}
+	if failed > 0 && failed == len(targets) {
+		// Every target failed: exiting 0 told scripts the push worked.
+		return fmt.Errorf("push failed against %d peer(s)", failed)
+	}
 	return nil
+}
+
+// syncSummary is the human sentence for a sync result, with a non-empty
+// fallback so a quiet sync still reads as finished rather than stalled.
+func syncSummary(res *sync.SyncResult) string {
+	if res == nil {
+		return "sync finished"
+	}
+	if strings.TrimSpace(res.Message) != "" {
+		return res.Message
+	}
+	if res.Pushed == 0 && res.Fetched == 0 {
+		return "already up to date"
+	}
+	return "sync complete"
 }
 
 func cmdPull(args []string) error {
@@ -98,7 +123,7 @@ func cmdPull(args []string) error {
 			fmt.Printf("  failed: %v\n", shortErr(err))
 			continue
 		}
-		fmt.Printf("  fetched=%d pushed=%d: %s\n", res.Fetched, res.Pushed, res.Message)
+		fmt.Printf("  fetched=%d pushed=%d: %s\n", res.Fetched, res.Pushed, syncSummary(res))
 		printSyncHint(res)
 		if res.ConflictBranch != "" {
 			fmt.Printf("  conflict branch: %s (your work untouched)\n", res.ConflictBranch)
