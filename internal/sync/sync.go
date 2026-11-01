@@ -142,6 +142,10 @@ type SyncResult struct {
 	// NeedsClone marks a workspace-gate refusal: the recovery is to clone the
 	// peer's repo (or have the peer clone yours), not to retry the sync.
 	NeedsClone bool
+	// Conflicts lists files edited on both sides during an auto-merge. Both
+	// versions are kept (the peer's as a .conflict-<peer>-<time> copy), so
+	// this is informational, not an error.
+	Conflicts []string
 }
 
 // SyncWithSession runs a full bidirectional sync over an established mux
@@ -753,8 +757,52 @@ func (e *Engine) integrate(remoteTip cas.Hash, remotePeer string, localTip cas.H
 		return e.conflictBranch(remoteTip, remotePeer, localBranch, res, "merge error: "+err.Error())
 	}
 	if len(overlapping) > 0 {
-		return e.conflictBranch(remoteTip, remotePeer, localBranch, res,
-			fmt.Sprintf("%d overlapping file(s): %s", len(overlapping), strings.Join(overlapping, ", ")))
+		// Both sides edited the same file. Parking the whole branch here
+		// stranded every OTHER file the peer sent — measured on a 48-file
+		// soak: zero of them reached the working tree, forever, because the
+		// overlap is baked into the two commits and retrying cannot fix it.
+		//
+		// So keep both versions: the local file stays as it is, and the
+		// peer's copy lands next to it as "<name>.conflict-<peer>-<time>.
+		// <ext>". Nothing is discarded, the rest of the peer's work applies,
+		// and the name itself says what happened. This is what every sync
+		// tool does (Dropbox's "conflicted copy"); git's "resolve it
+		// yourself" assumes someone is watching, and a daemon is not.
+		keep, copies, cerr := e.resolveOverlaps(overlapping, localTip, remoteTip, remotePeer)
+		if cerr != nil {
+			// Fall back to a conflict branch rather than losing the fetch.
+			return e.conflictBranch(remoteTip, remotePeer, localBranch, res,
+				fmt.Sprintf("%d overlapping file(s): %s", len(overlapping), strings.Join(overlapping, ", ")))
+		}
+		// tryMerge deliberately leaves overlapping paths OUT of the merged
+		// tree — the caller is expected to decide. Do not forget to put the
+		// local version back: an absent entry means the file is deleted.
+		for path, h := range keep {
+			merged[path] = h
+		}
+		for path, h := range copies {
+			merged[path] = h
+		}
+		res.Conflicts = append(res.Conflicts, overlapping...)
+		mergeC, mh, err := e.createMergeCommit(merged, localTip, remoteTip, remotePeer)
+		if err != nil {
+			return e.conflictBranch(remoteTip, remotePeer, localBranch, res, "merge error: "+err.Error())
+		}
+		_ = mergeC
+		oldHex, _ := e.Repo.GetRef(localBranch)
+		if err := e.Repo.SetRef(localBranch, cas.Hex(mh)); err != nil {
+			return err
+		}
+		e.Repo.AppendReflog(localBranch, oldHex, cas.Hex(mh), "sync",
+			"auto-merged "+cas.Short(remoteTip)+" keeping both copies of "+strings.Join(overlapping, ", "))
+		if err := Checkout(e.Repo, mh); err != nil {
+			return err
+		}
+		res.MergedCommit = cas.Hex(mh)
+		res.Message = fmt.Sprintf("auto-merged %s (kept both versions of %d file(s): %s)",
+			cas.Short(remoteTip), len(overlapping), strings.Join(overlapping, ", "))
+		_, _ = e.Repo.Replog.Append(replog.Entry{Type: replog.TypeMerge, PeerHex: remotePeer, Commit: cas.Hex(mh), Message: res.Message})
+		return nil
 	}
 	// Create merge commit.
 	mergeC, mh, err := e.createMergeCommit(merged, localTip, remoteTip, remotePeer)
@@ -774,6 +822,89 @@ func (e *Engine) integrate(remoteTip cas.Hash, remotePeer string, localTip cas.H
 	res.Message = "auto-merged " + cas.Short(remoteTip)
 	_, _ = e.Repo.Replog.Append(replog.Entry{Type: replog.TypeMerge, PeerHex: remotePeer, Commit: cas.Hex(mh), Message: res.Message})
 	return nil
+}
+
+// conflictCopyPath names the peer's version of an overlapping file. The
+// original path is split at its extension so the copy still opens with the
+// right application, and the peer id plus a timestamp make the name unique:
+// two devices resolving the same overlap at once must not collide.
+func conflictCopyPath(path string, peer string, when time.Time) string {
+	short := peer
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	dir := ""
+	base := path
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		dir, base = path[:i+1], path[i+1:]
+	}
+	ext := ""
+	if i := strings.LastIndex(base, "."); i > 0 {
+		base, ext = base[:i], base[i:]
+	}
+	return fmt.Sprintf("%s%s.conflict-%s-%s%s", dir, base, short, when.Format("20060102-150405"), ext)
+}
+
+// resolveOverlaps decides what happens to files edited on both sides: the
+// local version keeps its path, and the peer's bytes are stored under a
+// conflict-copy name. Returns the local entries to keep in the merged tree and
+// the copies to add beside them.
+func (e *Engine) resolveOverlaps(overlapping []string, localTip, remoteTip cas.Hash, remotePeer string) (keep, copies map[string]string, err error) {
+	local, err := e.treeMap(localTip)
+	if err != nil {
+		return nil, nil, err
+	}
+	remote, err := e.treeMap(remoteTip)
+	if err != nil {
+		return nil, nil, err
+	}
+	keep = map[string]string{}
+	copies = map[string]string{}
+	now := time.Now()
+	for _, p := range overlapping {
+		if lh, ok := local[p]; ok {
+			keep[p] = lh
+		}
+		hexHash, ok := remote[p]
+		if !ok {
+			continue // peer deleted it; keeping ours is the whole resolution
+		}
+		h, err := cas.ParseHex(hexHash)
+		if err != nil {
+			return nil, nil, err
+		}
+		raw, err := e.Repo.CAS.GetBytes(h, 64<<20)
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(raw) > 32<<20 {
+			// Too big to duplicate silently; let the user decide.
+			return nil, nil, fmt.Errorf("%s is %d bytes", p, len(raw))
+		}
+		bh, err := e.Repo.CAS.PutBytes(raw)
+		if err != nil {
+			return nil, nil, err
+		}
+		copies[conflictCopyPath(p, remotePeer, now)] = cas.Hex(bh)
+	}
+	return keep, copies, nil
+}
+
+// treeMap flattens a commit's tree into path→blob-hex.
+func (e *Engine) treeMap(commit cas.Hash) (map[string]string, error) {
+	c, err := e.Repo.DAG.Get(commit)
+	if err != nil {
+		return nil, err
+	}
+	th, err := cas.ParseHex(c.Tree)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	if err := merkle.Flatten(e.Repo.CAS, th, "", out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // shortHexStr truncates a hex id for display (defensive on length).

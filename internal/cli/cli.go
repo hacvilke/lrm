@@ -56,6 +56,37 @@ func Run(argv []string) int {
 		usage()
 		return 2
 	}
+	// git-style "-C <dir>": run as if started in <dir>. Lets the desktop app
+	// act on a repo that is not the process's working directory, and lets
+	// scripts point one command at another workspace without a subshell.
+	for len(argv) > 0 && (argv[0] == "-C" || argv[0] == "--directory") {
+		if len(argv) < 2 {
+			fmt.Fprintln(os.Stderr, "lrm: -C needs a directory")
+			return 2
+		}
+		if err := os.Chdir(argv[1]); err != nil {
+			// `lrm init <path>` creates the path, so `lrm -C <path> init` must
+			// too — otherwise the two spellings of the same command disagree.
+			if os.IsNotExist(err) && len(argv) > 2 && argv[2] == "init" {
+				if mkErr := os.MkdirAll(argv[1], 0o755); mkErr == nil {
+					if err2 := os.Chdir(argv[1]); err2 == nil {
+						err = nil
+					} else {
+						err = err2
+					}
+				}
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "lrm: -C %s: %v\n", argv[1], err)
+				return 1
+			}
+		}
+		argv = argv[2:]
+	}
+	if len(argv) == 0 {
+		usage()
+		return 2
+	}
 	cmd, args := argv[0], argv[1:]
 	var err error
 	switch cmd {
@@ -93,6 +124,10 @@ func Run(argv []string) int {
 		err = cmdDaemon(args)
 	case "dashboard", "dash":
 		err = cmdDashboard(args)
+	case "desktop", "app":
+		err = cmdDesktop(args)
+	case "update", "upgrade":
+		err = cmdUpdate(args)
 	case "receive", "drop":
 		err = cmdReceive(args)
 	case "pair":
@@ -208,6 +243,10 @@ Local engine:
   merge <BRANCH|HASH>                       merge into current branch
   cat-file <HASH>                           print a CAS object (small)
   replog [--last N]                         show replication log
+
+App + updates:
+  desktop [--port N] [--dir DIR]            local panel: create/join, invite, daemon, self-update
+  update [--check]                          install the newest release (hash-verified)
 
 P2P mesh:
   peers [--timeout SEC]                     discover LAN developers

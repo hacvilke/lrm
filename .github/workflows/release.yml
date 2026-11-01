@@ -27,16 +27,18 @@ jobs:
           echo "stamping builds as $VERSION"
           LDF="-s -w -X github.com/lrm-project/lrm/internal/cli.Version=$VERSION"
           build() {
-            os=$1; arch=$2; ext=""
+            pkg=$1; name=$2; os=$3; arch=$4; ext=""
             if [ "$os" = "windows" ]; then ext=".exe"; fi
-            GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LDF" -o "dist/lrm_${os}_${arch}${ext}" ./cmd/lrm
+            GOOS=$os GOARCH=$arch go build -trimpath -ldflags "$LDF" -o "dist/${name}_${os}_${arch}${ext}" "./${pkg}"
           }
-          build linux amd64
-          build linux arm64
-          build darwin amd64
-          build darwin arm64
-          build windows amd64
-          build windows arm64
+          for os in linux darwin windows; do
+            for arch in amd64 arm64; do
+              build cmd/lrm lrm "$os" "$arch"
+              # Same program, desktop entry point: double-clickable, opens the
+              # panel. Separate artifact only because the argv is different.
+              build cmd/lrm-desktop lrm_desktop "$os" "$arch"
+            done
+          done
           cd dist && sha256sum lrm_* > SHA256SUMS.txt && cd ..
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

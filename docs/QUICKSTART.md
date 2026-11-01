@@ -47,6 +47,30 @@ networkingMode=mirrored
 then `wsl --shutdown`. Check with `ip addr` that WSL now holds a real LAN
 address rather than a `172.x` one.
 
+## Prefer buttons? `lrm desktop`
+
+Everything below works from a terminal, but the first run of a project does
+not have to be typed:
+
+```sh
+lrm desktop          # opens a local page
+lrm-desktop          # same thing; on Windows, double-click this file
+```
+
+The page has one job, in order: put your name on it, create a workspace or
+paste a teammate's Port Key to join theirs, print the key your next teammate
+needs, start the background daemon, and update itself when a new release
+exists. It runs the same binary you would have typed — nothing is
+reimplemented for the UI — and it is bound to `127.0.0.1`, so it is not
+another thing listening on your network.
+
+Useful flags: `--port 7717` (panel port), `--dir PATH` (which workspace),
+`--no-open` (print the URL instead of launching a browser — for headless
+boxes and SSH).
+
+`lrm update` does the update without the page; `lrm update --check` only
+reports, and exits 10 if a newer release exists.
+
 ## The mental model
 
 Every machine holds the **full repo** — commits, history graph,

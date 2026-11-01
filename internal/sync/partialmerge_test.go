@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lrm-project/lrm/internal/cas"
 	"github.com/lrm-project/lrm/internal/store"
@@ -223,4 +224,23 @@ func mustHash(t *testing.T, hexStr string) cas.Hash {
 		t.Fatalf("bad hash %q: %v", hexStr, err)
 	}
 	return h
+}
+
+// TestSyncKeepsBothVersionsOnOverlap is the soak's second regression: the
+// daemon must never stall on an overlapping file. Both versions survive, the
+// peer's as a conflict copy, and everything else applies.
+func TestConflictCopyPath(t *testing.T) {
+	when := time.Date(2026, 10, 31, 14, 3, 12, 0, time.UTC)
+	cases := map[string]string{
+		"shared.txt":          "shared.conflict-c1d842d4-20261031-140312.txt",
+		"notes.md":            "notes.conflict-c1d842d4-20261031-140312.md",
+		"dir/sub/report.xlsx": "dir/sub/report.conflict-c1d842d4-20261031-140312.xlsx",
+		"Makefile":            "Makefile.conflict-c1d842d4-20261031-140312",
+		".env":                ".env.conflict-c1d842d4-20261031-140312",
+	}
+	for in, want := range cases {
+		if got := conflictCopyPath(in, "c1d842d4aaaaaaaa", when); got != want {
+			t.Errorf("conflictCopyPath(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

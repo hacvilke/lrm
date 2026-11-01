@@ -85,6 +85,52 @@ lrm share --lan
 lrm join lrm1_AQQiUwEBIPvCWoLq6VlKc14ZBsidRqO_hvaGtYYQZa8mLBVepV0yrw
 ```
 
+## The app (`lrm desktop`)
+
+`git` gives you a command line. Git for Windows also gives you a thing you can
+double-click: it sets up your name, chooses where things live, and gets you to a
+working repository. LRM's version of that is `lrm desktop` — one local page,
+served on `127.0.0.1`, that does the whole first run:
+
+```sh
+lrm desktop              # opens the panel in your browser
+lrm-desktop              # same thing, from a double-click (no terminal)
+```
+
+What it actually does, in order:
+
+1. **You** — a name, signed into every commit you make.
+2. **A workspace** — create one here, or **paste a teammate's Port Key** and
+   join theirs. This is the part git's installer has no concept of: the
+   repository is not yours alone, so setup ends with "here is your key" or
+   "paste theirs", not "choose a default branch name".
+3. **Invite** — one button prints the same-Wi-Fi Port Key (`share --lan`). The
+   other button asks your router for a public port and prints that one.
+4. **Network** — start/stop the background daemon, see its live log, force a
+   sync, and see whether a peer is actually connected.
+5. **Updates** — check for a newer release and install it in place.
+
+Nothing is reimplemented for the UI: every button runs the same `lrm` binary
+you would have typed, and shows you its output. There is one implementation of
+`share`, `clone` and `daemon`, so the panel cannot drift from the CLI.
+
+Two properties worth stating plainly, because they are the reason this is safe
+to leave running:
+
+- The panel binds **127.0.0.1 only**, checks the `Host` header, and requires a
+  per-run token in every form. A web page cannot reach it by DNS rebinding, and
+  a machine on your LAN cannot reach it at all.
+- Updates are **hash-verified** against the release's `SHA256SUMS.txt` before
+  anything is replaced, and a failed download leaves the working binary in
+  place. A release with no checksum file is refused outright.
+
+`lrm update` does the same update without the panel:
+
+```sh
+lrm update            # check, download, verify, install
+lrm update --check    # only report whether a newer release exists
+```
+
 ## Feature matrix
 
 | Tier | Feature | Status |
