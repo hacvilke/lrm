@@ -147,6 +147,9 @@ func (v Value) String() string {
 		}
 		return "{" + joinStrings(parts, ", ") + "}"
 	case KFunc:
+		if v.Fn.Name == "" {
+			return "<fn>"
+		}
 		return fmt.Sprintf("<fn %s>", v.Fn.Name)
 	case KBuiltin:
 		return fmt.Sprintf("<builtin %s>", v.Bl.Name)

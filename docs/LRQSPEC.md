@@ -30,7 +30,8 @@ find "substr" [IN ref] [LIMIT N]     filename substring search (case-insensitive
 ```
 
 `FROM` prefix is accepted (`FROM COMMITS;`) and singular table names
-work (`FROM COMMIT;`). `LIMIT` range is 1–500 (default 50).
+work (`FROM COMMIT;`). `LIMIT` range is 1–500 (default 50); anything else
+(`limit 0`, `limit 501`) is an error, not a clamp.
 
 ## Refs
 
@@ -49,7 +50,13 @@ through the CAS, and chunked files resolve via their manifest's
 `TotalSize` (stored tree sizes are unreliable for merged trees).
 
 `PATH LIKE` uses Go `path.Match` globs (`*`, `?`, `[...]`) matched
-against the full repo-relative path.
+against the full repo-relative path. A malformed pattern is a **parse
+error** (`bad LIKE glob "[abc": syntax error in pattern`), never a silent
+`(empty)` table.
+
+Stray `;` between queries are tolerated (`status;;`), same as LRS. Files
+are read as UTF-8 with an optional BOM and either LF or CRLF endings, so a
+Windows editor does not break a query file.
 
 ## Tables
 

@@ -133,6 +133,17 @@ type UnaryExpr struct {
 
 func (e *UnaryExpr) exprPos() Pos { return e.Pos }
 
+// FnExpr is an anonymous function literal: `fn(a, b) { return a + b; }`.
+// It evaluates to a KFunc value carrying the defining environment, so it
+// is a real closure (see Func.Closure).
+type FnExpr struct {
+	Pos    Pos
+	Params []string
+	Body   *BlockStmt
+}
+
+func (e *FnExpr) exprPos() Pos { return e.Pos }
+
 type CallExpr struct {
 	Pos  Pos
 	Fn   Expr
@@ -199,6 +210,7 @@ func Parse(src string) (*Program, error) {
 type parser struct {
 	toks []Token
 	i    int
+	prev Token // last consumed token (for diagnostics)
 }
 
 func (p *parser) peek() Token { return p.toks[p.i] }
@@ -215,6 +227,7 @@ func (p *parser) next() Token {
 	if p.i < len(p.toks)-1 {
 		p.i++
 	}
+	p.prev = t
 	return t
 }
 
@@ -222,9 +235,22 @@ func (p *parser) at(t Tok) bool { return p.peek().Type == t }
 
 func (p *parser) expect(t Tok, what string) (Token, error) {
 	if !p.at(t) {
+		if t == T_Semi {
+			return Token{}, p.missingSemi()
+		}
 		return Token{}, &ParseError{Msg: fmt.Sprintf("expected %s, found %s", what, describe(p.peek())), Pos: p.peek().Pos}
 	}
 	return p.next(), nil
+}
+
+// missingSemi explains the most common LRS syntax error: a statement on the
+// previous line that was never terminated. Newlines are not statement
+// terminators, so the parser only notices at the start of the next one.
+func (p *parser) missingSemi() *ParseError {
+	found := p.peek()
+	line := p.prev.Pos.Line
+	msg := fmt.Sprintf("missing ';' at the end of line %d — every LRS statement ends with ';', newlines are not terminators; found %s", line, describe(found))
+	return &ParseError{Msg: msg, Pos: found.Pos}
 }
 
 func describe(t Token) string {
@@ -327,15 +353,34 @@ func (p *parser) parseFn() (Stmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(T_LParen, "'('"); err != nil {
+	params, body, err := p.parseFnRest()
+	if err != nil {
 		return nil, err
+	}
+	return &FnDecl{Pos: t.Pos, Name: name.Text, Params: params, Body: body}, nil
+}
+
+// parseFnExpr parses an anonymous function literal `fn(a, b) { ... }`.
+func (p *parser) parseFnExpr() (Expr, error) {
+	t := p.next() // fn
+	params, body, err := p.parseFnRest()
+	if err != nil {
+		return nil, err
+	}
+	return &FnExpr{Pos: t.Pos, Params: params, Body: body}, nil
+}
+
+// parseFnRest parses "(params) { body }" shared by declarations and literals.
+func (p *parser) parseFnRest() ([]string, *BlockStmt, error) {
+	if _, err := p.expect(T_LParen, "'('"); err != nil {
+		return nil, nil, err
 	}
 	var params []string
 	if !p.at(T_RParen) {
 		for {
 			id, err := p.expect(T_Ident, "parameter name")
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			params = append(params, id.Text)
 			if p.at(T_Comma) {
@@ -346,13 +391,13 @@ func (p *parser) parseFn() (Stmt, error) {
 		}
 	}
 	if _, err := p.expect(T_RParen, "')'"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	body, err := p.parseBlock()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return &FnDecl{Pos: t.Pos, Name: name.Text, Params: params, Body: body}, nil
+	return params, body, nil
 }
 
 func (p *parser) parseIf() (Stmt, error) {
@@ -674,6 +719,8 @@ func (p *parser) parsePrimary() (Expr, error) {
 		return p.parseList()
 	case T_LBrace:
 		return p.parseMap()
+	case T_Fn:
+		return p.parseFnExpr()
 	default:
 		return nil, &ParseError{Msg: fmt.Sprintf("unexpected %s", describe(t)), Pos: t.Pos}
 	}

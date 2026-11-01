@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lrm-project/lrm/internal/lr"
@@ -22,6 +23,11 @@ func cmdRun(args []string) error {
 	}
 	if len(args) == 0 {
 		return fmt.Errorf("usage: lrm run <script.lr> [--report PATH] [--timeout 30s] [-- args...]")
+	}
+	// A flag where the script path belongs used to be treated as a filename,
+	// which wrote a report called "--help_report_*.txt". Say what is wrong.
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("unknown flag %q for 'lrm run'", args[0])
 	}
 	var timeout time.Duration
 	if timeoutStr != "" {
@@ -46,6 +52,9 @@ func cmdQuery(args []string) error {
 	report, args := flagVal(args, "--report")
 	if len(args) == 0 {
 		return fmt.Errorf("usage: lrm query <queries.lrq> [--report PATH]")
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("unknown flag %q for 'lrm query'", args[0])
 	}
 	res := lrq.RunFile(args[0], lrq.Options{ReportPath: report})
 	if !res.Passed {

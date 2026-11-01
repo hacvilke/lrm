@@ -292,3 +292,50 @@ func TestEngineHashPrefixRef(t *testing.T) {
 		t.Fatalf("show table:\n%s", res.Tables[0].Render())
 	}
 }
+
+// TestParseToleratesStraySemis: LRS tolerates stray ';' between statements;
+// the query language should not fail on a doubled terminator either.
+func TestParseToleratesStraySemis(t *testing.T) {
+	qs := mustParse(t, "status;;\n\nbranches;;\n")
+	if len(qs) != 2 || qs[0].Kind != "status" || qs[1].Kind != "branches" {
+		t.Fatalf("got %+v", qs)
+	}
+}
+
+// TestBadGlobIsAnError: a malformed LIKE pattern must not look like a real
+// "(empty)" answer — path.Match reports ErrBadPattern and we surface it.
+func TestBadGlobIsAnError(t *testing.T) {
+	_, err := Parse(`files path like "[abc";`)
+	if err == nil {
+		t.Fatal("bad glob must be rejected at parse time")
+	}
+	if !strings.Contains(err.Error(), "bad LIKE glob") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+	// A valid glob still parses.
+	mustParse(t, `files path like "src/*.go";`)
+}
+
+// TestFindNeedsPattern keeps the error honest: FIND with no argument used to
+// complain about a missing ';', which pointed at the wrong problem.
+func TestFindNeedsPattern(t *testing.T) {
+	_, err := Parse("find;")
+	if err == nil {
+		t.Fatal("find without a substring must fail")
+	}
+	if !strings.Contains(err.Error(), "FIND needs a quoted substring") {
+		t.Fatalf("unhelpful error: %v", err)
+	}
+}
+
+// TestUTF8BOMQueryFile: Windows editors prepend a BOM; it must not become
+// "unexpected character 'ï' at offset 0".
+func TestUTF8BOMQueryFile(t *testing.T) {
+	qs, err := Parse("\ufeffstatus;\r\nbranches;\r\n")
+	if err != nil {
+		t.Fatalf("BOM+CRLF query file must parse: %v", err)
+	}
+	if len(qs) != 2 {
+		t.Fatalf("got %d queries", len(qs))
+	}
+}

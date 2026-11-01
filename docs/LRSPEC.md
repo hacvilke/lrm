@@ -23,7 +23,14 @@ optimizes for correctness and clear errors, not JIT speed.
 - Strings: `"..."` with `\"`, `\\`, `\n`, `\t` escapes.
 - Numbers: one `num` type (float64); `18443`, `1.5` both num.
 - Identifiers: `[A-Za-z_][A-Za-z0-9_]*`.
-- Statement terminators: newline or `;` (both accepted, freely mixed).
+- Statement terminators: **`;` is required** on every statement (declaration,
+  assignment, expression, `return`, `break`, `continue`). Newlines are
+  ordinary whitespace and do *not* end a statement — this is a Rust-flavored
+  language, not a newline-terminated one. Stray `;` between statements are
+  tolerated. Omitting one gives:
+  `missing ';' at the end of line N — every LRS statement ends with ';',
+  newlines are not terminators`.
+- Encoding: UTF-8, with or without a BOM; CRLF and LF line endings both work.
 
 ## 2. Types
 
@@ -35,7 +42,7 @@ optimizes for correctness and clear errors, not JIT speed.
 | `string` | `"hi"` | immutable, rune-indexed by `len()` |
 | `list` | `[1, "a", true]` | heterogeneous, 0-indexed |
 | `map` | `{"k": 1}` or `{k: 1}` | string keys; `m.k` ≡ `m["k"]` |
-| `fn` | `fn(a) { return a; }` | first-class, closures capture |
+| `fn` | `fn(a) { return a; }` | first-class; closures capture their defining env |
 
 **Truthiness:** only `null` and `false` are falsy. `0`, `""`, `[]`
 are all truthy — one rule, no surprises.
@@ -65,13 +72,22 @@ while x < 10 { x += 1; }
 for i in [1, 2, 3] { ... } // also over strings (chars) and maps (keys)
 for k in {a: 1} { ... }
 break;  continue;
-fn add(a, b) { return a + b; }
+fn add(a, b) { return a + b; }             // declaration
+let inc = fn(x) { return x + 1; };         // anonymous function (closure)
 return value;              // top-level return ends the program
 ```
 
+Functions are values: assign them, pass them, return them, store them in
+lists, call them indirectly (`let f = inc; f(1)`). Anonymous functions
+capture the environment where they are written — one closure per loop
+iteration — and can recurse through their own binding
+(`let fact = fn(n) { if n < 2 { return 1; } return n * fact(n - 1); };`).
+
 `for` over a map iterates sorted keys. `break`/`continue` only inside
 loops (parse-agnostic runtime error otherwise). Max call depth 500;
-infinite loops are stopped by the run timeout (default 5 min) — and
+infinite loops are stopped by the run timeout (default 5 min; `--timeout`
+overrides it), checked on every loop iteration as well as every statement
+— an empty `while true { }` body still times out — and
 blocking builtins (`sleep_ms`, network probes, `lrm_*` dials) cap their
 own waits to the same deadline, so a single long call cannot outlive it.
 
@@ -199,7 +215,33 @@ assert totals, and `verdict: PASS|FAIL`.
 
 Exit code: `0` on PASS, `1` on FAIL.
 
-## 11. Examples
+## 11. What v1 does *not* have
+
+Listed so nobody has to discover it by trial and error. None of these are
+bugs; they are the current edge of the language. If you need one, say so —
+they are additions, not rewrites.
+
+- **No `try`/`catch`, no exceptions.** Runtime errors abort the run (the
+  report still lands with `verdict: FAIL`); I/O and network builtins return
+  `{ok:false, error:...}` instead of throwing. Note the split: `int("abc")`
+  *is* a hard error, while `read_file` on a missing path is not.
+- **No regex, no JSON encode/decode, no base64, no string `replace`/
+  `substr`/`index_of`.** Only the string builtins in §5 exist.
+- **No environment access** (`getenv`), no process/exec builtins, no
+  reading stdin. Script arguments come from `args()` after `--`.
+- **No list helpers** (`map`, `filter`, `reduce`, `sort`, `range`, `push`,
+  `pop`, `slice`). You write the loop. `sort_by_latency` is the one
+  exception, kept because batch probes produce it.
+- **No directory builtins** (`read_dir`, `glob`, `remove_file`, `mkdir`,
+  `append_file`). Scripts can read, write and stat single files inside the
+  sandbox and nothing else.
+- **No HTTP beyond `GET`**: no headers, no POST/PUT, no auth helpers, no
+  redirect policy knobs.
+- **No `parallel for`.** Fan-out exists only as the batch builtins in §8.1,
+  which do the concurrency in Go behind one call.
+- **No modules/`import`.** One file per run; compose with `lrm run`.
+
+## 12. Examples
 
 - `examples/check_site.lr` — probe a URL (DNS + HTTP + body match).
 - `examples/share_team.lr` — commit work, mint a Port Key for a teammate.

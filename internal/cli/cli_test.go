@@ -3,6 +3,7 @@ package cli
 import (
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -57,5 +58,17 @@ func TestIsListening(t *testing.T) {
 	_ = ln.Close()
 	if isListening(port) {
 		t.Fatalf("port %d should report closed after listener shutdown", port)
+	}
+}
+
+// Regression: `lrm run --help` used to treat "--help" as a script path,
+// fail to read it, and leave a "--help_report_*.txt" behind in the cwd.
+func TestRunRejectsFlagAsScript(t *testing.T) {
+	err := cmdRun([]string{"--help"})
+	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("want unknown-flag error, got %v", err)
+	}
+	if err := cmdQuery([]string{"--report"}); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("want unknown-flag error for query, got %v", err)
 	}
 }
