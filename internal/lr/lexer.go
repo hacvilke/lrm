@@ -99,6 +99,9 @@ func (e *LexError) Error() string { return fmt.Sprintf("%s at %s", e.Msg, e.Pos)
 
 // Lex tokenizes LRS source.
 func Lex(src string) ([]Token, error) {
+	// Windows editors (Notepad, PowerShell >, Excel exports) prepend a UTF-8
+	// BOM. It is not part of the program; strip it before lexing.
+	src = strings.TrimPrefix(src, "\ufeff")
 	l := &lexer{src: src, line: 1, col: 1}
 	var out []Token
 	for {

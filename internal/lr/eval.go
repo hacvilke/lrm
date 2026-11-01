@@ -236,6 +236,12 @@ func (ev *Evaluator) evalStmt(s Stmt, env *Env) (*signal, *RuntimeError) {
 		ev.loopDepth++
 		defer func() { ev.loopDepth-- }()
 		for {
+			// Tick per iteration: an empty (or comment-only) body would
+			// otherwise never reach the tick inside evalBlock, and
+			// `while true { }` would spin forever past the run deadline.
+			if err := ev.tick(st.Pos); err != nil {
+				return nil, err
+			}
 			c, err := ev.evalExpr(st.Cond, env)
 			if err != nil {
 				return nil, err
@@ -420,6 +426,10 @@ func (ev *Evaluator) evalExpr(e Expr, env *Env) (Value, *RuntimeError) {
 			return Null, ev.errf(x.Pos, "%s has no fields", obj.TypeName())
 		}
 		return obj.Get(x.Name), nil
+	case *FnExpr:
+		// Anonymous function: capture the defining environment now, so the
+		// value keeps working after this scope returns.
+		return Value{Kind: KFunc, Fn: &Func{Name: "", Params: x.Params, Body: x.Body, Closure: env}}, nil
 	case *ListExpr:
 		out := make([]Value, 0, len(x.Elems))
 		for _, el := range x.Elems {

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -98,6 +99,8 @@ type tok struct {
 }
 
 func lex(src string) ([]tok, error) {
+	// Tolerate a UTF-8 BOM (Notepad / PowerShell writers on Windows).
+	src = strings.TrimPrefix(src, "\ufeff")
 	var out []tok
 	i := 0
 	for i < len(src) {
@@ -210,6 +213,12 @@ func Parse(src string) ([]Query, error) {
 	p := &qparser{toks: toks}
 	var out []Query
 	for p.i < len(p.toks) {
+		// Tolerate stray separators between queries ("status;;"), the way
+		// LRS tolerates stray semicolons.
+		if p.toks[p.i].text == ";" {
+			p.i++
+			continue
+		}
 		q, err := p.parseOne()
 		if err != nil {
 			return nil, err
@@ -336,6 +345,11 @@ func (p *qparser) parseOne() (Query, error) {
 			if !ok || !pat.isStr {
 				return q, fmt.Errorf("LIKE needs a quoted glob, e.g. LIKE \"src/*.go\"")
 			}
+			// Reject malformed globs here: path.Match reports ErrBadPattern,
+			// and silently matching nothing would look like a real answer.
+			if _, err := path.Match(pat.text, "x"); err != nil {
+				return q, fmt.Errorf("bad LIKE glob %q: %v", pat.text, err)
+			}
 			q.Pattern = pat.text
 		}
 		if p.eat("bigger") {
@@ -372,8 +386,8 @@ func (p *qparser) parseOne() (Query, error) {
 	case "find":
 		q.Kind = "find"
 		pat, ok := p.next()
-		if !ok {
-			return q, fmt.Errorf("FIND needs a substring")
+		if !ok || pat.text == ";" || !pat.isStr {
+			return q, fmt.Errorf("FIND needs a quoted substring, e.g. FIND \"note\"")
 		}
 		q.Pattern = pat.text
 		if p.eat("in") {
