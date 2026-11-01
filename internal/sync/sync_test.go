@@ -103,12 +103,20 @@ func TestSyncFetchEmptyPeer(t *testing.T) {
 	}
 }
 
-// TestSyncConflictBranch verifies concurrent edits to the same file produce
-// a HEAD-peer-* branch instead of overwriting.
+// TestSyncConflictBranch verifies concurrent edits to the same file keep both
+// versions instead of overwriting one of them.
+//
+// This used to assert that the peer's tip was parked on a HEAD-peer-* branch.
+// A 90-second soak showed why that is not good enough: the overlap is baked
+// into the two commits, so every retry hits the same conflict branch, and the
+// peer's unrelated files never arrive — 48 files transferred, 0 applied,
+// indefinitely, with nobody at the keyboard to run `lrm merge`.
+//
+// New contract: the local file is untouched, the peer's version lands beside
+// it as a conflict copy, and the sync reports the overlap in Conflicts.
 func TestSyncConflictBranch(t *testing.T) {
 	a := mkRepo(t, "alice")
-	h0 := commitFile(t, a, "shared.txt", "base\n", "base")
-	_ = h0
+	commitFile(t, a, "shared.txt", "base\n", "base")
 
 	// Clone alice → carol via sync, then diverge both on the same file.
 	c := mkRepo(t, "carol")
@@ -124,12 +132,14 @@ func TestSyncConflictBranch(t *testing.T) {
 	sessC.Close()
 
 	commitFile(t, a, "shared.txt", "alice edit\n", "alice concurrent")
+	commitFile(t, a, "alice-only.txt", "A\n", "alice adds a file too")
 	commitFile(t, c, "shared.txt", "carol edit\n", "carol concurrent")
+	commitFile(t, c, "carol-only.txt", "C\n", "carol adds a file too")
 
 	// Sync carol → alice (alice initiates against carol).
 	pa2, pb2 := net.Pipe()
-	sessA2 := mux.NewSession(pa2, true)  // alice dials
-	sessC2 := mux.NewSession(pb2, false) // carol serves
+	sessA2 := mux.NewSession(pa2, true)
+	sessC2 := mux.NewSession(pb2, false)
 	defer sessA2.Close()
 	defer sessC2.Close()
 	wg.Add(2)
@@ -144,19 +154,48 @@ func TestSyncConflictBranch(t *testing.T) {
 	if errC != nil {
 		t.Fatalf("carol sync: %v", errC)
 	}
-	if resA.ConflictBranch == "" {
-		t.Fatalf("expected conflict branch, got result: %+v", resA)
+
+	// The overlap is reported, not fatal.
+	if len(resA.Conflicts) != 1 || resA.Conflicts[0] != "shared.txt" {
+		t.Fatalf("Conflicts = %v, want [shared.txt] (result: %+v)", resA.Conflicts, resA)
 	}
-	// Alice's own tip must be untouched (still her edit).
+	if resA.MergedCommit == "" {
+		t.Fatalf("expected an auto-merge commit, got %+v", resA)
+	}
+
+	// Alice's own text is intact — a merge must never silently pick a winner.
 	raw, _ := os.ReadFile(filepath.Join(a.Root, "shared.txt"))
 	if string(raw) != "alice edit\n" {
 		t.Fatalf("alice workdir overwritten: %q", raw)
 	}
-	// Conflict branch exists and points at carol's tip.
-	tipC, _, _ := c.HeadCommit()
-	cbHex, _ := a.GetRef(resA.ConflictBranch)
-	if cbHex != cas.Hex(tipC) {
-		t.Fatalf("conflict branch %s=%s, want carol tip %s", resA.ConflictBranch, cbHex, cas.Hex(tipC))
+
+	// Carol's text is recoverable on disk, under a name that says where it
+	// came from.
+	entries, err := os.ReadDir(a.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copies []string
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".conflict-") {
+			copies = append(copies, e.Name())
+		}
+	}
+	if len(copies) != 1 {
+		t.Fatalf("expected exactly one conflict copy, got %v (%v)", copies, entries)
+	}
+	if !strings.HasPrefix(copies[0], "shared.conflict-") || !strings.HasSuffix(copies[0], ".txt") {
+		t.Fatalf("conflict copy has an unhelpful name: %q", copies[0])
+	}
+	body, _ := os.ReadFile(filepath.Join(a.Root, copies[0]))
+	if string(body) != "carol edit\n" {
+		t.Fatalf("conflict copy = %q, want carol's text", body)
+	}
+
+	// And the files that did NOT conflict must have arrived — that is the
+	// whole point of the fix.
+	if b, err := os.ReadFile(filepath.Join(a.Root, "carol-only.txt")); err != nil || string(b) != "C\n" {
+		t.Fatalf("carol-only.txt did not sync: %q %v", b, err)
 	}
 }
 
